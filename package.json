@@ -23,10 +23,13 @@
     "test:browser": "node scripts/browser-check.mjs",
     "e2e": "node scripts/e2e-web.mjs",
     "simulate": "node scripts/simulate.mjs",
-    "check": "npm run typecheck && npm test && npm run build:demo && npm run test:browser && npm run e2e && npm run simulate",
+    "check": "npm run typecheck && npm test && npm run build:demo && npm run test:browser && npm run e2e && npm run simulate && npm run simulate:money",
     "pretest": "node scripts/link.mjs",
     "pree2e": "node scripts/link.mjs",
-    "presimulate": "node scripts/link.mjs"
+    "presimulate": "node scripts/link.mjs",
+    "simulate:money": "node scripts/simulate-money.mjs",
+    "presimulate:money": "node scripts/link.mjs",
+    "make-admin": "node scripts/make-admin.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
