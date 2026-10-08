@@ -11,11 +11,22 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test \"packages/*/test/**/*.test.ts\"",
+    "db:start": "node scripts/dev-db.mjs start",
+    "db:stop": "node scripts/dev-db.mjs stop",
+    "db:reset": "node scripts/dev-db.mjs reset",
+    "build:web": "node scripts/build-web.mjs",
+    "start": "node scripts/link.mjs && node scripts/build-web.mjs && node --disable-warning=ExperimentalWarning packages/server/src/main.ts",
+    "test": "node --test --test-concurrency=1 \"packages/*/test/**/*.test.ts\"",
+    "test:core": "node --test \"packages/chess-core/test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json",
     "build:demo": "node scripts/build-demo.mjs",
     "test:browser": "node scripts/browser-check.mjs",
-    "check": "npm run typecheck && npm test && npm run build:demo && npm run test:browser"
+    "e2e": "node scripts/e2e-web.mjs",
+    "simulate": "node scripts/simulate.mjs",
+    "check": "npm run typecheck && npm test && npm run build:demo && npm run test:browser && npm run e2e && npm run simulate",
+    "pretest": "node scripts/link.mjs",
+    "pree2e": "node scripts/link.mjs",
+    "presimulate": "node scripts/link.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",

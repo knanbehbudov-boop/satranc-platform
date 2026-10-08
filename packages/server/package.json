@@ -1,0 +1,10 @@
+{
+  "name": "@satranc/server",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Modüler monolit sunucu: M0 altyapı, M1 kimlik, M3 oyun sunucusu, M4a bot, M5 turnuva, M6 rating. Harici bağımlılık yok.",
+  "dependencies": {
+    "@satranc/chess-core": "0.1.0"
+  }
+}
