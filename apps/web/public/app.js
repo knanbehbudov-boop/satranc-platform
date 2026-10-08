@@ -730,11 +730,18 @@
     const join = { type: 'game.join', gameId };
     ws.keep(join);
     const ticker = setInterval(() => { if (s.state && !s.ended) renderPlayers(); }, 100);
+    // Adil oyun telemetrisi (doküman 14.2 Katman 2): yalnız oyuncunun kendi canlı oyununda
+    // sekme gizlendi/göründü bilgisi gönderilir; zaman damgasını sunucu koyar.
+    const onVisibility = () => {
+      if (s.myColor && !s.ended) ws.send({ type: 'game.focus', gameId, hidden: document.visibilityState === 'hidden' });
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       off();
       ws.drop(join);
       ws.send({ type: 'game.leave', gameId });
       clearInterval(ticker);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }
 
@@ -819,6 +826,7 @@
         payMsg,
         d.status === 'STARTING' ? el('p', { class: 'msg info' }, `Turnuva doldu. Herkes ${d.readySeconds} saniye içinde "Hazırım" demeli; demeyen hükmen elenir${paid ? ' (ücret iade edilmez)' : ''}.`) : null,
         el('p', { class: 'small muted' }, `Her eşleşme renk değişimli 2 oyun; 1–1'de Armageddon (beyaz 5 dk, siyah 4 dk, beraberlikte siyah). Oyunlar arası mola ${d.breakSeconds} sn.`),
+        paid ? el('p', { class: 'small muted', id: 'fairplay-note' }, 'Adil oyun: ücretli oyunlar bittikten sonra motorla analiz edilir; oyun sırasında sekme değiştirme kaydedilir. Ödüller inceleme bitince serbest kalır.') : null,
       );
 
       const rounds = [];

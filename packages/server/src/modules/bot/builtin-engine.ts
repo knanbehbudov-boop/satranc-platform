@@ -7,7 +7,10 @@
  * üretimde Stockfish kullanılır (STOCKFISH_PATH).
  *
  * Desteklenen komutlar: uci, isready, ucinewgame, setoption (BotNoise, BotDepth,
- * Skill Level), position [startpos|fen ...] [moves ...], go [depth N] [movetime N], stop, quit.
+ * Skill Level, MultiPV), position [startpos|fen ...] [moves ...],
+ * go [depth N] [movetime N] [searchmoves m1 m2 ...], stop, quit.
+ * Analiz kipi (MultiPV > 1 ya da searchmoves): Stockfish gibi her aday için
+ * "info depth D multipv K score cp|mate X pv <hamle>" satırı yazar.
  */
 import { randomInt } from 'node:crypto';
 import { realpathSync } from 'node:fs';
@@ -113,9 +116,10 @@ export class Search {
   }
 
   /** Kök hamleleri ayrı ayrı puanlar (hata payıyla seçim için). */
-  scoreRoot(pos: Position, depth: number): { move: InternalMove; score: number }[] {
+  scoreRoot(pos: Position, depth: number, only?: ReadonlySet<string>): { move: InternalMove; score: number }[] {
     const out: { move: InternalMove; score: number }[] = [];
     for (const m of ordered(pos)) {
+      if (only && !only.has(toUci(m))) continue;
       const score = -this.negamax(applyMove(pos, m), depth - 1, -MATE - 1, MATE + 1, 1);
       if (this.aborted) break;
       out.push({ move: m, score });
@@ -145,12 +149,37 @@ export function chooseMove(pos: Position, depth: number, noiseCp: number, moveti
   return { ...pick, nodes: search.nodes };
 }
 
+/** Analiz: kök hamlelerin tam puanları, büyükten küçüğe (searchmoves ile sınırlanabilir). */
+export function analyse(pos: Position, depth: number, movetimeMs: number, only?: ReadonlySet<string>): { move: InternalMove; score: number }[] {
+  const search = new Search();
+  search.setDeadline(Date.now() + movetimeMs);
+  let best: { move: InternalMove; score: number }[] = [];
+  for (let d = 1; d <= depth; d++) {
+    const scored = search.scoreRoot(pos, d, only);
+    if (search.aborted && best.length) break;
+    if (scored.length) best = scored;
+    if (search.aborted) break;
+  }
+  return best.sort((a, b) => b.score - a.score);
+}
+
+/** UCI puan biçimi: mat mesafesi ya da centipawn. */
+export function uciScore(score: number): string {
+  if (Math.abs(score) >= MATE - 1000) {
+    const plies = MATE - Math.abs(score);
+    const n = Math.ceil(plies / 2);
+    return `mate ${score > 0 ? n : -n}`;
+  }
+  return `cp ${score}`;
+}
+
 // ---- UCI döngüsü (yalnız doğrudan çalıştırıldığında) ------------------------
 
 function main(): void {
   let pos = parseFen(START_FEN);
   let depth = 3;
   let noise = 0;
+  let multiPv = 1;
   const out = (s: string): void => {
     process.stdout.write(s + '\n');
   };
@@ -166,6 +195,7 @@ function main(): void {
           out('option name BotDepth type spin default 3 min 1 max 6');
           out('option name BotNoise type spin default 0 min 0 max 1000');
           out('option name Skill Level type spin default 20 min 0 max 20');
+          out('option name MultiPV type spin default 1 min 1 max 10');
           out('uciok');
           break;
         case 'isready':
@@ -181,6 +211,7 @@ function main(): void {
           const value = Number(parts.slice(valueIdx + 1).join(' '));
           if (name === 'BotDepth') depth = Math.max(1, Math.min(6, value));
           else if (name === 'BotNoise') noise = Math.max(0, value);
+          else if (name === 'MultiPV') multiPv = Math.max(1, Math.min(10, value));
           else if (name === 'Skill Level') {
             depth = 1 + Math.round((value / 20) * 3);
             noise = Math.round((20 - value) * 15);
@@ -203,9 +234,24 @@ function main(): void {
         case 'go': {
           let d = depth;
           let movetime = 5_000;
+          let only: Set<string> | undefined;
           for (let i = 1; i < parts.length; i++) {
             if (parts[i] === 'depth') d = Number(parts[++i]);
             else if (parts[i] === 'movetime') movetime = Number(parts[++i]);
+            else if (parts[i] === 'searchmoves') {
+              only = new Set();
+              while (i + 1 < parts.length && /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(parts[i + 1] as string)) only.add(parts[++i] as string);
+            }
+          }
+          if (multiPv > 1 || only) {
+            const lines = analyse(pos, d, movetime, only);
+            if (!lines.length) {
+              out('bestmove (none)');
+              break;
+            }
+            lines.slice(0, multiPv).forEach((l, k) => out(`info depth ${d} multipv ${k + 1} score ${uciScore(l.score)} pv ${toUci(l.move)}`));
+            out(`bestmove ${toUci((lines[0] as { move: InternalMove }).move)}`);
+            break;
           }
           const r = chooseMove(pos, d, noise, movetime);
           if (!r) out('bestmove (none)');

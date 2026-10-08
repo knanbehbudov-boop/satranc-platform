@@ -261,7 +261,7 @@ describe('ücretli turnuva sonu: hesaplaşma, bekletme, cüzdan', () => {
   it('risk kapısı "bekle" derse ödül serbest kalmaz (DISPUTED); yönetici kararıyla serbest bırakılır', async () => {
     const id = await openPaid(4, 1000, 1500);
     const players = await strongestWins(4);
-    env.app.tournaments.riskGate = async () => 'hold';
+    env.app.tournaments.riskGate = async () => ({ wait: false, hold: 'all', delay: [] });
     try {
       for (const p of players) await joinAndPay(p.client, id);
       const d = await waitStatus(id, ['DISPUTED']);
@@ -270,7 +270,7 @@ describe('ücretli turnuva sonu: hesaplaşma, bekletme, cüzdan', () => {
       const w = await champ.client.get('/v1/me/wallet');
       assert.equal(w.body.balances.find((b: any) => b.currency === 'USD').pendingCents, d.awards.find((a: any) => a.id === champ.id).cents);
     } finally {
-      env.app.tournaments.riskGate = async () => 'ok';
+      env.app.tournaments.riskGate = env.app.fairplay.gate;
     }
     await env.app.pool.tx(async (tx) => {
       const t = (await tx.query<any>('SELECT * FROM tournaments WHERE id = $1 FOR UPDATE', [id])).rows[0];

@@ -27,7 +27,7 @@ services:
       DATABASE_URL: postgres://satranc:satranc-dev@db:5432/satranc
       JWT_SECRET: yerel-gelistirme-anahtari-uretimde-mutlaka-degistirin
       DEV_MAILBOX: "1"
-      # Stockfish kurulu bir imaj kullanılırsa: STOCKFISH_PATH: /usr/games/stockfish
+      # İmaj Stockfish'i /usr/bin/stockfish olarak içerir (Dockerfile).
     ports:
       - "8080:8080"
 

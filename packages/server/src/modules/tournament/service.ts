@@ -59,8 +59,11 @@ export interface TemplateSnapshot {
   prize_scheme?: unknown;
 }
 
-/** Ödül kapısı: hile incelemesi açık olan turnuvanın ödülü serbest bırakılmaz (M10, Bölüm 9). */
-export type RiskGate = (q: Queryable, tournamentId: string) => Promise<'ok' | 'hold'>;
+/**
+ * Ödül kapısı (M10): analiz bitmeden hiçbir ödül serbest kalmaz (wait); yüksek riskli
+ * oyuncunun ödülü insan incelemesine kalır (hold → turnuva DISPUTED); orta riskte bekletme uzar (delay).
+ */
+export type RiskGate = (q: Queryable, tournamentId: string) => Promise<{ wait: boolean; hold: string[] | 'all'; delay: string[] }>;
 
 export interface JoinResult {
   status: 'OPEN' | 'STARTING' | 'RESERVED';
@@ -126,7 +129,7 @@ export class TournamentService {
   private readonly payments: PaymentService;
   private readonly ledger: LedgerService;
   private readonly flags: FlagService;
-  riskGate: RiskGate = async () => 'ok';
+  riskGate: RiskGate = async () => ({ wait: false, hold: [], delay: [] });
   private lastRelease = 0;
   private ticker: NodeJS.Timeout | null = null;
   private watchdog: NodeJS.Timeout | null = null;
@@ -794,30 +797,38 @@ export class TournamentService {
   async releaseDuePrizes(): Promise<number> {
     const due = await this.pool.query<{ tournament_id: string }>(
       `SELECT DISTINCT a.tournament_id FROM prize_awards a JOIN tournaments t ON t.id = a.tournament_id
-       WHERE a.status = 'PENDING' AND a.hold_until <= now() AND t.status = 'SETTLING' LIMIT 20`,
+       WHERE a.status = 'PENDING' AND a.hold_until <= now() AND t.status IN ('SETTLING', 'DISPUTED') LIMIT 20`,
     );
     let released = 0;
     for (const { tournament_id: id } of due.rows) {
       released += await this.withTx(async (tx, notes) => {
         const t = await this.lock(tx, id);
-        if (t.status !== 'SETTLING') return 0;
-        if ((await this.riskGate(tx, id)) === 'hold') {
+        if (t.status !== 'SETTLING' && t.status !== 'DISPUTED') return 0;
+        const gate = await this.riskGate(tx, id);
+        if (gate.wait) return 0;
+        const awardees = (await tx.query<{ user_id: string }>(`SELECT user_id FROM prize_awards WHERE tournament_id = $1 AND status = 'PENDING'`, [id])).rows.map((r) => r.user_id);
+        const hold = new Set(gate.hold === 'all' ? awardees : gate.hold.filter((u) => awardees.includes(u)));
+        const skip = new Set([...hold, ...gate.delay]);
+        // Temiz oyuncular beklemez; yalnız işaretli oyuncunun ödülü incelemede kalır.
+        const n = await this.releaseAwards(tx, t, notes, true, skip);
+        if (hold.size && t.status === 'SETTLING') {
           await this.transition(tx, t, 'DISPUTED', 'fair_play_review', 'system');
           notes.push(() => this.notify(id));
-          return 0;
         }
-        return this.releaseAwards(tx, t, notes, true);
+        return n;
       });
     }
     return released;
   }
 
   /** Ödülleri serbest bırakır; hepsi bittiyse SETTLED. `onlyDue=false`: yönetici kararıyla hemen. */
-  async releaseAwards(tx: Connection, t: TournamentRow, notes: Notes, onlyDue: boolean): Promise<number> {
-    const rows = await tx.query<{ user_id: string; cents: number; currency: string }>(
-      `SELECT user_id, cents, currency FROM prize_awards WHERE tournament_id = $1 AND status = 'PENDING' AND ($2 = false OR hold_until <= now()) FOR UPDATE`,
-      [t.id, onlyDue],
+  async releaseAwards(tx: Connection, t: TournamentRow, notes: Notes, onlyDue: boolean, skip: ReadonlySet<string> = new Set(), only?: string): Promise<number> {
+    const r = await tx.query<{ user_id: string; cents: number; currency: string }>(
+      `SELECT user_id, cents, currency FROM prize_awards WHERE tournament_id = $1 AND status = 'PENDING' AND ($2 = false OR hold_until <= now())
+         AND ($3::uuid IS NULL OR user_id = $3::uuid) FOR UPDATE`,
+      [t.id, onlyDue, only ?? null],
     );
+    const rows = { rows: r.rows.filter((a) => !skip.has(a.user_id)) };
     for (const a of rows.rows) {
       await this.ledger.releasePrize(tx, { tournamentId: t.id, userId: a.user_id, cents: a.cents, currency: a.currency });
       await tx.query(`UPDATE prize_awards SET status = 'RELEASED', released_at = now() WHERE tournament_id = $1 AND user_id = $2`, [t.id, a.user_id]);
@@ -830,6 +841,45 @@ export class TournamentService {
       notes.push(() => this.notify(t.id));
     }
     return rows.rows.length;
+  }
+
+  /**
+   * Hile kararı (insan onayıyla): bekletmedeki ödül iptal edilir ve FAIR_PLAY_RESERVE'e gider (K29).
+   * Kalan ödüller yoksa turnuva kapanır. Mağdurlara dağıtım ayrı bir yönetim kararıdır.
+   */
+  async voidAward(tx: Connection, tournamentId: string, userId: string, caseId: string, notes: Notes): Promise<boolean> {
+    const t = await this.lock(tx, tournamentId);
+    const a = await tx.query<{ cents: number; currency: string }>(
+      `SELECT cents, currency FROM prize_awards WHERE tournament_id = $1 AND user_id = $2 AND status = 'PENDING' FOR UPDATE`,
+      [tournamentId, userId],
+    );
+    const row = a.rows[0];
+    if (row) {
+      await this.ledger.voidPrize(tx, { tournamentId, userId, cents: row.cents, currency: row.currency, caseId });
+      await tx.query(`UPDATE prize_awards SET status = 'VOID', note = $3 WHERE tournament_id = $1 AND user_id = $2`, [tournamentId, userId, `fair_play_case:${caseId}`]);
+      notes.push(() => this.hub.sendToUser(userId, { type: 'prize.voided', tournamentId }));
+    }
+    await tx.query(`UPDATE entries SET status = 'DISQUALIFIED' WHERE tournament_id = $1 AND user_id = $2`, [tournamentId, userId]);
+    await this.closeIfDone(tx, t, notes, 'fair_play_decided');
+    return !!row;
+  }
+
+  /** İnceleme temiz çıktı: oyuncunun ödülü (bekletme süresini beklemeden) serbest kalır. */
+  async clearAward(tx: Connection, tournamentId: string, userId: string, notes: Notes): Promise<void> {
+    const t = await this.lock(tx, tournamentId);
+    await this.releaseAwards(tx, t, notes, false, new Set(), userId);
+    await this.closeIfDone(tx, t, notes, 'fair_play_decided');
+  }
+
+  /** İncelemedeki turnuvanın bekleyen ödülü kalmadıysa kapanır. */
+  private async closeIfDone(tx: Connection, t: TournamentRow, notes: Notes, reason: string): Promise<void> {
+    if (t.status !== 'DISPUTED' && t.status !== 'SETTLING') return;
+    const left = await tx.query(`SELECT 1 FROM prize_awards WHERE tournament_id = $1 AND status = 'PENDING' LIMIT 1`, [t.id]);
+    const any = await tx.query(`SELECT 1 FROM prize_awards WHERE tournament_id = $1 LIMIT 1`, [t.id]);
+    if (left.rowCount || !any.rowCount) return;
+    await this.transition(tx, t, 'SETTLED', reason, 'system');
+    await tx.query('UPDATE tournaments SET settled_at = now() WHERE id = $1', [t.id]);
+    notes.push(() => this.notify(t.id));
   }
 
   /** Yönetici: açık ya da hazır olma aşamasındaki turnuvayı iptal eder; ödenen her koltuk iade edilir. */

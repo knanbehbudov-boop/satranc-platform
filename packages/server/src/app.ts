@@ -22,6 +22,8 @@ import { RatingService } from './modules/rating/service.ts';
 import { TournamentService } from './modules/tournament/service.ts';
 import { LedgerService } from './modules/ledger/service.ts';
 import { FlagService } from './modules/admin/flags.ts';
+import { AnalysisService } from './modules/fairplay/analysis.ts';
+import { FairPlayService } from './modules/fairplay/service.ts';
 import type { PaymentProvider } from './modules/payments/provider.ts';
 import { SandboxPsp } from './modules/payments/sandbox.ts';
 import { PaymentService } from './modules/payments/service.ts';
@@ -47,6 +49,8 @@ export interface App {
   ledger: LedgerService;
   payments: PaymentService;
   flags: FlagService;
+  analysis: AnalysisService;
+  fairplay: FairPlayService;
   /** Yalnız PAYMENT_PROVIDER=sandbox iken. */
   sandbox: SandboxPsp | null;
   /** Dinlenen gerçek port (0 verilirse işletim sisteminin seçtiği). */
@@ -165,6 +169,14 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   events.subscribe('tournament-payments', ['payment.succeeded', 'payment.failed'], (ev, tx, hooks) =>
     ev.topic === 'payment.succeeded' ? tournaments.onPaymentSucceeded(ev, tx, hooks) : tournaments.onPaymentFailed(ev, tx, hooks));
   events.subscribe('settlement', ['tournament.finished'], tournaments.onTournamentFinished);
+
+  // ---- M4b analiz ve M10 adil oyun ----
+  const analysis = new AnalysisService({ pool, cfg, logger: logger.child({ part: 'analysis' }) });
+  const fairplay = new FairPlayService({ pool, cfg, logger: logger.child({ part: 'fairplay' }), hub, games, identity, ratings });
+  events.subscribe('analysis', ['game.ended'], analysis.onGameEnded);
+  events.subscribe('fairplay', ['analysis.completed', 'analysis.failed'], (ev, tx, hooks) =>
+    ev.topic === 'analysis.completed' ? fairplay.onAnalysisCompleted(ev, tx, hooks) : fairplay.onAnalysisFailed(ev, tx));
+  tournaments.riskGate = fairplay.gate;
   const tid = (ctx: { params: Record<string, string> }): string => {
     if (!isUuid(ctx.params.id)) throw notFound('TOURNAMENT_NOT_FOUND', 'Turnuva bulunamadı');
     return ctx.params.id as string;
@@ -274,6 +286,8 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     ledger,
     payments,
     flags,
+    analysis,
+    fairplay,
     sandbox,
     port: cfg.port,
     async start() {
@@ -283,6 +297,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       events.start();
       payments.start();
       sandbox?.start();
+      analysis.start();
       await games.start();
       await tournaments.start();
       logger.info('Sunucu hazır', { url: `http://${cfg.host}:${app.port}` });
@@ -291,6 +306,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       events.stop();
       payments.stop();
       sandbox?.stop();
+      analysis.stop();
       tournaments.stop();
       games.stop();
       bots.stop();

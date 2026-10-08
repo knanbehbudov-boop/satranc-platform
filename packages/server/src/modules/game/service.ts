@@ -651,6 +651,15 @@ export class GameService {
   }
 
   /** Kullanıcının oynadığı canlı oyunlar (lobide "oyununa dön" için). */
+  /** Canlı oyunda kullanıcının koltuğu (odak telemetrisi için): renk, sıra kimde, kaçıncı yarım hamle. */
+  liveSeat(gameId: string, userId: string): { color: 'w' | 'b'; myTurn: boolean; ply: number; paid: boolean } | null {
+    const r = this.rooms.get(gameId);
+    if (!r || r.ended) return null;
+    const color = r.colorOf(userId);
+    if (!color) return null;
+    return { color, myTurn: r.chess.turn === color, ply: r.chess.plyCount(), paid: r.row.paid };
+  }
+
   liveGamesOf(userId: string): string[] {
     const out: string[] = [];
     for (const r of this.rooms.values()) if (!r.ended && r.colorOf(userId)) out.push(r.row.id);

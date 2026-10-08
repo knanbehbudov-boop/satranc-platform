@@ -48,6 +48,16 @@ export interface Config {
   seatReservationSec: number;
   /** Ödül bekletme süresini sabitler (yalnız geliştirme/test); boşsa doküman 5.8 tablosu. */
   prizeHoldSec: number | null;
+  /** M4b analiz: sabit derinlik (karşılaştırılabilirlik için), MultiPV 3. Stockfish için 18, yerleşik motor için 3. */
+  analysisDepth: number;
+  analysisMovetimeMs: number;
+  analysisWorkers: number;
+  /** Açılış hariç tutma: ilk N yarım hamle istatistiğe girmez (doküman: ilk 10 hamle). */
+  analysisSkipPlies: number;
+  /** Ücretsiz turnuva oyunlarını da analiz et (geliştirme/demo; üretimde maliyet nedeniyle kapalı). */
+  analyzeFreeGames: boolean;
+  /** Orta risk: ödül bekletmesine eklenen süre (doküman 14.3). */
+  riskMediumExtraHoldSec: number;
 }
 
 function num(name: string, fallback: number): number {
@@ -101,10 +111,18 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     paidMinRatedGames: num('PAID_MIN_RATED_GAMES', 10),
     seatReservationSec: num('SEAT_RESERVATION_SEC', 600),
     prizeHoldSec: process.env.PRIZE_HOLD_SEC ? num('PRIZE_HOLD_SEC', 0) : null,
+    analysisDepth: num('ANALYSIS_DEPTH', process.env.STOCKFISH_PATH ? 18 : 3),
+    analysisMovetimeMs: num('ANALYSIS_MOVETIME_MS', 3000),
+    analysisWorkers: num('ANALYSIS_WORKERS', 1),
+    analysisSkipPlies: num('ANALYSIS_SKIP_PLIES', 20),
+    analyzeFreeGames: bool('ANALYZE_FREE_GAMES', false),
+    riskMediumExtraHoldSec: num('RISK_MEDIUM_EXTRA_HOLD_SEC', 24 * 3600),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');
   if (prod && cfg.devMailbox) throw new Error('DEV_MAILBOX üretimde açılamaz');
+  // K33: hile analizi sığ yerleşik motorla anlamlı değildir; ücretli turnuva varken üretimde Stockfish şart.
+  if (prod && !cfg.stockfishPath) throw new Error('Üretimde STOCKFISH_PATH zorunludur (adil oyun analizi)');
   if (prod && cfg.prizeHoldSec !== null) throw new Error('PRIZE_HOLD_SEC üretimde kullanılamaz (doküman 5.8 süreleri geçerli)');
   if (!['sandbox', 'stripe'].includes(cfg.paymentProvider)) throw new Error('PAYMENT_PROVIDER sandbox ya da stripe olmalı');
   if (prod && cfg.paymentProvider === 'sandbox') throw new Error('Sandbox ödeme sağlayıcısı üretimde kullanılamaz');
