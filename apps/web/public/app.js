@@ -266,6 +266,7 @@
       nav.replaceChildren(
         el('a', { href: '#/' }, 'Lobi'),
         el('a', { href: '#/cuzdan', id: 'nav-wallet' }, 'Cüzdan'),
+        isStaff() ? el('a', { href: '#/yonetim', id: 'nav-admin' }, 'Yönetim') : null,
         el('span', { class: 'who' }, session.user.displayName),
         el('button', { class: 'btn', type: 'button', onclick: logout }, 'Çıkış'),
       );
@@ -291,6 +292,7 @@
       if (parts[0] === 'oyun' && parts[1]) return (cleanup = gameView(parts[1]));
       if (parts[0] === 'turnuva' && parts[1]) return (cleanup = tournamentView(parts[1], params));
       if (parts[0] === 'cuzdan') return (cleanup = await walletView());
+      if (parts[0] === 'yonetim') return (cleanup = await adminView(parts[1] || 'genel', parts[2], params));
       return (cleanup = await lobbyView());
     } catch (e) {
       mount(el('p', { class: 'msg err' }, e.message || String(e)));
@@ -966,6 +968,203 @@
       if (/^(payment|prize)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
     });
     return () => { off(); clearTimeout(t); };
+  }
+
+  // ---- yönetim paneli (M13) ---------------------------------------------------------
+
+  function isStaff() {
+    const r = session.user?.roles || [];
+    return r.includes('admin') || r.includes('finance') || r.includes('fairplay');
+  }
+  const LEVEL_PILL = { critical: 'warn', high: 'warn', medium: '', low: 'done' };
+  const LEVEL_TR = { critical: 'kritik', high: 'yüksek', medium: 'orta', low: 'düşük' };
+  const ACTION_TR = {
+    'fairplay.decide': 'Adil oyun kararı', 'user.ban': 'Kalıcı ban', 'user.unban': 'Ban kaldır', 'user.unfreeze': 'Dondurmayı kaldır',
+    'payment.refund': 'Elle iade', 'flag.enable': 'Özelliği yeniden aç',
+  };
+
+  function table(headers, rows, id) {
+    return el('div', { class: 'table-wrap' }, el('table', { class: 'tbl', id },
+      el('thead', {}, el('tr', {}, headers.map((h) => el('th', {}, h)))),
+      el('tbody', {}, rows.length ? rows.map((r) => el('tr', {}, r.map((c) => el('td', {}, c)))) : el('tr', {}, el('td', { colspan: headers.length, class: 'muted' }, 'Kayıt yok'))),
+    ));
+  }
+
+  function askReason(label) {
+    const r = prompt(`${label}\nGerekçe (denetim kaydına yazılır):`);
+    if (r === null) return null;
+    if (r.trim().length < 3) { toast('Gerekçe en az 3 karakter olmalı.'); return null; }
+    return r.trim();
+  }
+
+  async function adminAct(fn, okText) {
+    try {
+      const r = await fn();
+      toast(r?.needsApproval || r?.applied === false ? 'Talep oluşturuldu; başka bir yönetici onaylamalı (dört göz).' : okText || 'Tamam.');
+      await route();
+    } catch (e) { toast(e.message); }
+  }
+
+  async function adminView(tab, sub, params) {
+    if (!session.user) { location.hash = '#/giris'; return null; }
+    const tabs = [['genel', 'Genel'], ['vakalar', 'Vakalar'], ['onaylar', 'Onaylar'], ['finans', 'Finans'], ['turnuvalar', 'Turnuvalar'], ['kullanicilar', 'Kullanıcılar'], ['bayraklar', 'Bayraklar'], ['denetim', 'Denetim']];
+    const body = el('div', { class: 'col', id: 'admin-body' }, el('p', { class: 'muted' }, 'Yükleniyor…'));
+    mount(
+      el('header', {}, el('p', { class: 'eyebrow' }, 'Yönetim'), el('h1', {}, 'Kontrol paneli')),
+      el('nav', { class: 'tabs', id: 'admin-tabs' }, tabs.map(([k, label]) => el('a', { href: `#/yonetim/${k}`, class: k === tab ? 'on' : '' }, label))),
+      body,
+    );
+    const me = session.user.id;
+    try {
+      if (tab === 'genel') {
+        const o = await api('GET', '/v1/admin/overview');
+        const stat = (label, value, cls) => el('div', { class: `stat ${cls || ''}` }, el('span', { class: 'small muted' }, label), el('b', { class: 'mono' }, value));
+        const paid = o.flags.find((f) => f.key === 'paid_tournaments');
+        body.replaceChildren(
+          el('section', { class: 'card' }, el('h2', {}, 'Durum'),
+            el('div', { class: 'stats' },
+              stat('Bekleyen onay', o.pendingApprovals, o.pendingApprovals ? 'warn' : ''),
+              stat('Açık vaka (yüksek+)', (o.openCases.high || 0) + (o.openCases.critical || 0), (o.openCases.high || o.openCases.critical) ? 'warn' : ''),
+              stat('Açık vaka (orta)', o.openCases.medium || 0),
+              stat('Analiz kuyruğu', `${o.analysisQueue.queued || 0} bekliyor · ${o.analysisQueue.failed || 0} hatalı`),
+              stat('Ödemeler (24 sa)', `${o.payments24h.n} · ${money(o.payments24h.cents, 'USD')}`),
+              stat('Bekleyen iade', `${o.refunds.pending}${o.refunds.stuck ? ` (${o.refunds.stuck} takılı)` : ''}`, o.refunds.stuck ? 'warn' : ''),
+              stat('Kullanıcı', `${o.users.total} (+${o.users.new24} bugün, ${o.users.frozen} dondurulmuş)`),
+              stat('Defter', o.ledger.balanced && !o.ledger.negativeUserBalances ? 'dengeli' : 'SORUN', o.ledger.balanced ? 'ok' : 'warn'),
+            )),
+          el('section', { class: 'card' }, el('h2', {}, 'Turnuvalar'),
+            el('div', { class: 'row' }, Object.entries(o.tournaments).map(([k, v]) => el('span', { class: `pill ${(STATUS[k] || [])[1] || ''}` }, `${(STATUS[k] || [k])[0]}: ${v}`)))),
+          el('section', { class: 'card' }, el('h2', {}, 'Acil durdurma'),
+            el('p', {}, 'Ücretli kayıt: ', el('b', { id: 'paid-flag' }, paid?.enabled ? 'AÇIK' : 'KAPALI')),
+            el('p', { class: 'small muted' }, 'Durdurmak tek kişiyle ve hemen olur. Yeniden açmak için ikinci bir yöneticinin onayı gerekir.'),
+            el('button', { class: `btn ${paid?.enabled ? 'danger' : ''}`, type: 'button', id: 'kill-switch', onclick: () => {
+              const reason = askReason(paid?.enabled ? 'Ücretli kayıtlar DURDURULACAK.' : 'Ücretli kayıtların yeniden açılması önerilecek.');
+              if (reason) void adminAct(() => api('POST', '/v1/admin/flags/paid_tournaments', { enabled: !paid?.enabled, reason }), 'Ücretli kayıtlar durduruldu.');
+            } }, paid?.enabled ? 'Ücretli kayıtları durdur' : 'Yeniden açmayı öner')),
+          o.lastReconciliation ? el('p', { class: 'small muted' }, `Son mutabakat: ${fmtTime(o.lastReconciliation.created_at)} · fark ${money(o.lastReconciliation.diff_cents, o.lastReconciliation.currency)}`) : null,
+        );
+      } else if (tab === 'vakalar' && sub) {
+        const d = await api('GET', `/v1/admin/cases/${sub}`);
+        const c = d.case;
+        const open = c.status === 'OPEN';
+        const proposed = c.proposed_decision;
+        body.replaceChildren(
+          el('section', { class: 'card', id: 'case-detail' },
+            el('div', { class: 'spread' }, el('h2', {}, `Vaka · ${c.display_name}`), el('span', { class: `pill ${LEVEL_PILL[c.level]}` }, `${LEVEL_TR[c.level]} · ${Number(c.max_score).toFixed(2)}`)),
+            el('p', { class: 'small' }, `Durum: ${c.status} · Hesap: ${c.user_status} · Turnuva: ${c.tournament_name || '—'} (${c.tournament_status || '—'}) · Açıldı: ${fmtTime(c.opened_at)}`),
+            el('h3', { class: 'h3' }, 'Sebepler'),
+            el('ul', { class: 'reasons' }, (c.reasons || []).map((r) => el('li', {}, r.reason))),
+            el('h3', { class: 'h3' }, 'Oyun analizleri'),
+            table(['Oyun', 'Motor', 'Analiz edilen', 'ACPL', 'Top-1', 'Karmaşık top-1', 'Ritim (CV)'], d.analyses.map((a) => {
+              const p = a.summary.players.white.userId === c.user_id ? a.summary.players.white : a.summary.players.black;
+              return [el('a', { href: `#/oyun/${a.game_id}` }, a.game_id.slice(0, 8)), `${a.engine} d${a.depth}`, p.analysedMoves, p.acpl ?? '—', p.top1 ?? '—', p.complexTop1 ?? '—', p.thinkCv ?? '—'];
+            })),
+            el('h3', { class: 'h3' }, 'Risk skorları'),
+            table(['Oyun', 'Skor', 'Motor', 'Zaman', 'Odak', 'Bağlantı', 'Davranış'], d.riskScores.map((r) => [r.game_id.slice(0, 8), Number(r.score).toFixed(2), r.components.engine, r.components.time, r.components.focus, r.components.link, r.components.behav])),
+            el('p', { class: 'small muted' }, 'Skor tek başına delil değildir; karar çoklu oyun ve göstergeye, insan incelemesine dayanır (doküman 14.4).'),
+            open && !proposed ? el('div', { class: 'row' },
+              el('button', { class: 'btn', type: 'button', id: 'propose-clear', onclick: () => { const r = askReason('Vaka TEMİZ kapatılacak; ödül serbest kalacak.'); if (r) void adminAct(() => api('POST', `/v1/admin/cases/${sub}/propose`, { decision: 'clear', reason: r })); } }, 'Temize çıkar (öner)'),
+              el('button', { class: 'btn danger', type: 'button', id: 'propose-confirm', onclick: () => { const r = askReason('İHLAL onaylanacak; bekleyen ödül iptal edilip rezerve aktarılacak.'); if (r) void adminAct(() => api('POST', `/v1/admin/cases/${sub}/propose`, { decision: 'confirm', ban: confirm('Hesap kalıcı olarak da kapatılsın mı?'), reason: r })); } }, 'İhlali onayla (öner)'),
+            ) : open ? el('p', { class: 'msg info' }, `Öneri bekliyor: ${proposed === 'clear' ? 'temize çıkar' : 'ihlal'} — "${c.proposed_note}". Onaylar sekmesinden ikinci kişi onaylar.`) : el('p', { class: 'msg ok' }, `Karar: ${c.status} — ${c.decision_note || ''}`),
+          ),
+          d.previousCases.length ? el('section', { class: 'card' }, el('h2', {}, 'Önceki vakalar'), table(['Durum', 'Seviye', 'Skor', 'Açıldı'], d.previousCases.map((p) => [p.status, LEVEL_TR[p.level], Number(p.max_score).toFixed(2), fmtTime(p.opened_at)]))) : null,
+        );
+      } else if (tab === 'vakalar') {
+        const st = params.get('durum') || 'OPEN';
+        const d = await api('GET', `/v1/admin/cases?status=${st}`);
+        body.replaceChildren(el('section', { class: 'card' },
+          el('div', { class: 'spread' }, el('h2', {}, 'Adil oyun vakaları'),
+            el('div', { class: 'row' }, ['OPEN', 'CLEARED', 'CONFIRMED', 'ALL'].map((x) => el('a', { class: `btn ${x === st ? 'primary' : ''}`, href: `#/yonetim/vakalar?durum=${x}` }, { OPEN: 'Açık', CLEARED: 'Temiz', CONFIRMED: 'İhlal', ALL: 'Tümü' }[x])))),
+          table(['Oyuncu', 'Seviye', 'Skor', 'Turnuva', 'Hesap', 'Açıldı', ''], d.cases.map((c) => [
+            c.display_name, el('span', { class: `pill ${LEVEL_PILL[c.level]}` }, LEVEL_TR[c.level]), Number(c.max_score).toFixed(2), c.tournament_name || '—', c.user_status, fmtTime(c.opened_at),
+            el('a', { class: 'btn', href: `#/yonetim/vakalar/${c.id}` }, c.proposed_decision ? 'İncele (öneri var)' : 'İncele'),
+          ]), 'cases-table'),
+        ));
+      } else if (tab === 'onaylar') {
+        const d = await api('GET', `/v1/admin/approvals?status=${params.get('durum') || 'PENDING'}`);
+        body.replaceChildren(el('section', { class: 'card' },
+          el('h2', {}, 'Dört göz onayları'),
+          el('p', { class: 'small muted' }, 'Para ve hesap üzerinde kalıcı etkisi olan işlemler, öneren dışında bir yöneticinin onayıyla yürütülür.'),
+          table(['İşlem', 'Hedef', 'Gerekçe', 'Öneren', 'Zaman', 'Durum', ''], d.approvals.map((a) => [
+            ACTION_TR[a.action] || a.action, `${a.target_type} ${String(a.target_id).slice(0, 8)}${a.payload?.decision ? ` · ${a.payload.decision === 'clear' ? 'temiz' : 'ihlal'}${a.payload.ban ? ' + ban' : ''}` : ''}`,
+            a.reason, a.requested_by_name, fmtTime(a.requested_at), a.status,
+            a.status !== 'PENDING' ? (a.result?.error ? el('span', { class: 'err' }, a.result.error) : '') : a.requested_by === me
+              ? el('div', { class: 'row' }, el('span', { class: 'small muted' }, 'Başka bir yönetici onaylamalı'), el('button', { class: 'btn', type: 'button', onclick: () => void adminAct(() => api('POST', `/v1/admin/approvals/${a.id}/reject`, { note: 'geri çekildi' }), 'Talep geri çekildi.') }, 'Geri çek'))
+              : el('div', { class: 'row' },
+                el('button', { class: 'btn accent', type: 'button', dataset: { approve: a.id }, onclick: () => void adminAct(() => api('POST', `/v1/admin/approvals/${a.id}/approve`, { note: '' }), 'Onaylandı ve yürütüldü.') }, 'Onayla'),
+                el('button', { class: 'btn', type: 'button', onclick: () => void adminAct(() => api('POST', `/v1/admin/approvals/${a.id}/reject`, { note: prompt('Red notu') || '' }), 'Reddedildi.') }, 'Reddet')),
+          ]), 'approvals-table'),
+          el('a', { href: '#/yonetim/onaylar?durum=ALL', class: 'small' }, 'Geçmiş talepler'),
+        ));
+      } else if (tab === 'finans') {
+        const d = await api('GET', '/v1/admin/finance');
+        body.replaceChildren(
+          el('section', { class: 'card' }, el('div', { class: 'spread' }, el('h2', {}, 'Defter'),
+            el('button', { class: 'btn', type: 'button', id: 'reconcile', onclick: () => void adminAct(async () => { const r = await api('POST', '/v1/admin/finance/reconcile', { currency: 'USD' }); toast(`Mutabakat: fark ${money(r.diffCents ?? 0, 'USD')}${r.ok ? ' (tamam)' : ' — İNCELE'}`); return {}; }, ' ') }, 'Mutabakat çalıştır')),
+            el('p', { class: `msg ${d.invariants.balanced ? 'ok' : 'err'}` }, d.invariants.balanced ? 'Defter dengeli: her para biriminde borç = alacak.' : 'DEFTER DENGESİZ'),
+            table(['Hesap', 'Tür', 'Para', 'Bakiye'], d.accounts.map((a) => [a.code, a.type, a.currency, money(a.balance_cents, a.currency)]), 'accounts-table')),
+          el('section', { class: 'card' }, el('h2', {}, 'Son ödemeler'),
+            table(['Oyuncu', 'Turnuva', 'Tutar', 'Ücret', 'Durum', 'İade', 'Zaman', ''], d.payments.map((p) => [
+              p.display_name, p.tournament_name || '—', money(p.amount_cents, p.currency), money(p.fee_cents, p.currency), p.status,
+              p.refund_status ? `${p.refund_status}${p.refund_error ? ` (${p.refund_attempts} deneme: ${p.refund_error})` : ''}` : '—', fmtTime(p.created_at),
+              p.status === 'SUCCEEDED' && !p.refund_status ? el('button', { class: 'btn', type: 'button', onclick: () => { const r = askReason('Elle iade önerilecek.'); if (r) void adminAct(() => api('POST', `/v1/admin/payments/${p.id}/refund`, { reason: r })); } }, 'İade öner') : '',
+            ]))),
+          el('section', { class: 'card' }, el('h2', {}, 'Mutabakat raporları'),
+            table(['Zaman', 'Para', 'Defter', 'Sağlayıcı', 'Fark', 'Dengesiz işlem'], d.reconciliation.map((r) => [fmtTime(r.created_at), r.currency, money(r.ledger_cents, r.currency), money(r.provider_cents, r.currency), money(r.diff_cents, r.currency), r.unbalanced_tx]))),
+        );
+      } else if (tab === 'turnuvalar') {
+        const d = await api('GET', '/v1/admin/tournaments');
+        body.replaceChildren(el('section', { class: 'card' }, el('h2', {}, 'Turnuvalar'),
+          table(['Ad', 'Durum', 'Oyuncu', 'Ücret', 'Havuz', 'Ödüller', 'Vaka', ''], d.tournaments.map((t) => [
+            el('a', { href: `#/turnuva/${t.id}` }, t.name), el('span', { class: `pill ${(STATUS[t.status] || [])[1] || ''}` }, (STATUS[t.status] || [t.status])[0]), `${t.players}/${t.capacity}`,
+            t.entry_fee_cents > 0 ? money(t.entry_fee_cents, t.currency) : 'ücretsiz', t.prize_pool_cents ? money(t.prize_pool_cents, t.currency) : '—',
+            (t.awards || []).map((a) => `${a.rank}. ${money(a.cents, t.currency)} ${a.status === 'RELEASED' ? '✓' : a.status === 'VOID' ? '✗' : '…'}`).join(' · ') || '—',
+            t.open_cases ? el('span', { class: 'pill warn' }, String(t.open_cases)) : '',
+            ['OPEN', 'STARTING'].includes(t.status) ? el('button', { class: 'btn danger', type: 'button', onclick: () => { const r = askReason(`"${t.name}" iptal edilecek; ödenen tüm ücretler iade edilecek.`); if (r) void adminAct(() => api('POST', `/v1/admin/tournaments/${t.id}/cancel`, { reason: r }), 'Turnuva iptal edildi; iadeler başlatıldı.'); } }, 'İptal et') : '',
+          ]), 'admin-tournaments')));
+      } else if (tab === 'kullanicilar') {
+        if (sub) {
+          const d = await api('GET', `/v1/admin/users/${sub}`);
+          const u = d.user;
+          const propose = (action, label) => () => { const r = askReason(label); if (r) void adminAct(() => api('POST', `/v1/admin/users/${sub}/propose`, { action, reason: r })); };
+          body.replaceChildren(el('section', { class: 'card' },
+            el('div', { class: 'spread' }, el('h2', {}, u.display_name), el('span', { class: `pill ${u.status === 'active' ? 'live' : 'warn'}` }, u.status)),
+            el('p', { class: 'small' }, `${u.email} · ${u.country_code} · roller: ${u.roles.join(', ')} · kayıt ${fmtTime(u.created_at)}`),
+            el('div', { class: 'row' },
+              u.status === 'active' ? el('button', { class: 'btn', type: 'button', onclick: () => { const r = askReason('Hesap GEÇİCİ dondurulacak (hemen).'); if (r) void adminAct(() => api('POST', `/v1/admin/users/${sub}/freeze`, { reason: r }), 'Hesap donduruldu.'); } }, 'Geçici dondur') : null,
+              u.status === 'frozen' ? el('button', { class: 'btn', type: 'button', onclick: propose('unfreeze', 'Dondurma kaldırılacak.') }, 'Dondurmayı kaldır (öner)') : null,
+              u.status !== 'banned' ? el('button', { class: 'btn danger', type: 'button', onclick: propose('ban', 'Hesap KALICI kapatılacak.') }, 'Kalıcı ban (öner)') : el('button', { class: 'btn', type: 'button', onclick: propose('unban', 'Ban kaldırılacak.') }, 'Banı kaldır (öner)'),
+            ),
+            el('h3', { class: 'h3' }, 'Bakiye'), table(['Para', 'Çekilebilir', 'Bekletmede'], d.balances.map((b) => [b.currency, money(b.availableCents, b.currency), money(b.pendingCents, b.currency)])),
+            el('h3', { class: 'h3' }, 'Cihazlar'), table(['Cihaz', 'Son IP', 'Son görülme', 'Paylaşan hesap'], d.devices.map((x) => [x.device_key.slice(0, 10), x.last_ip, fmtTime(x.last_seen), x.shared_with ? el('span', { class: 'pill warn' }, String(x.shared_with)) : '0'])),
+            el('h3', { class: 'h3' }, 'Vakalar'), table(['Durum', 'Seviye', 'Skor', 'Açıldı', ''], d.cases.map((c) => [c.status, LEVEL_TR[c.level], Number(c.max_score).toFixed(2), fmtTime(c.opened_at), el('a', { href: `#/yonetim/vakalar/${c.id}` }, 'aç')])),
+            el('h3', { class: 'h3' }, 'Ödemeler'), table(['Turnuva', 'Tutar', 'Durum', 'Zaman'], d.payments.map((p) => [p.tournamentName || '—', money(p.amountCents, p.currency), p.status, fmtTime(p.createdAt)])),
+            el('h3', { class: 'h3' }, 'Denetim'), table(['Zaman', 'İşlem', 'Veri'], d.audit.map((a) => [fmtTime(a.created_at), a.action, JSON.stringify(a.data).slice(0, 120)])),
+          ));
+        } else {
+          const qv = params.get('q') || '';
+          const d = await api('GET', `/v1/admin/users?q=${encodeURIComponent(qv)}`);
+          const input = el('input', { id: 'user-q', value: qv, placeholder: 'E-posta, ad ya da kimlik' });
+          body.replaceChildren(el('section', { class: 'card' }, el('h2', {}, 'Kullanıcılar'),
+            el('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); location.hash = `#/yonetim/kullanicilar?q=${encodeURIComponent(input.value)}`; } }, input, el('button', { class: 'btn', type: 'submit' }, 'Ara')),
+            table(['Ad', 'E-posta', 'Durum', 'Roller', 'Kayıt', ''], d.users.map((u) => [u.display_name, u.email, u.status, u.roles.join(', '), fmtTime(u.created_at), el('a', { class: 'btn', href: `#/yonetim/kullanicilar/${u.id}` }, 'Aç')]))));
+        }
+      } else if (tab === 'bayraklar') {
+        const d = await api('GET', '/v1/admin/flags');
+        body.replaceChildren(el('section', { class: 'card' }, el('h2', {}, 'Özellik bayrakları'),
+          table(['Anahtar', 'Durum', 'Açıklama', 'Güncellendi', ''], d.flags.map((f) => [
+            f.key, el('span', { class: `pill ${f.enabled ? 'live' : 'warn'}` }, f.enabled ? 'açık' : 'kapalı'), f.note || '', fmtTime(f.updatedAt),
+            el('button', { class: `btn ${f.enabled ? 'danger' : ''}`, type: 'button', onclick: () => { const r = askReason(f.enabled ? `${f.key} KAPATILACAK (hemen).` : `${f.key} yeniden açılması önerilecek.`); if (r) void adminAct(() => api('POST', `/v1/admin/flags/${f.key}`, { enabled: !f.enabled, reason: r }), 'Bayrak kapatıldı.'); } }, f.enabled ? 'Kapat' : 'Açmayı öner'),
+          ]))));
+      } else if (tab === 'denetim') {
+        const d = await api('GET', '/v1/admin/audit?limit=200');
+        body.replaceChildren(el('section', { class: 'card' }, el('h2', {}, 'Denetim kaydı'),
+          table(['Zaman', 'Kim', 'İşlem', 'Hedef', 'Veri'], d.entries.map((a) => [fmtTime(a.created_at), a.actor || 'sistem', a.action, `${a.target_type || ''} ${String(a.target_id || '').slice(0, 8)}`, JSON.stringify(a.data).slice(0, 160)]), 'audit-table')));
+      }
+    } catch (e) {
+      body.replaceChildren(el('p', { class: 'msg err' }, e.status === 403 ? 'Bu bölüm için yetkiniz yok.' : e.message));
+    }
+    return null;
   }
 
   // ---- başlangıç ------------------------------------------------------------------

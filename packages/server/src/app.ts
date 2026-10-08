@@ -22,6 +22,8 @@ import { RatingService } from './modules/rating/service.ts';
 import { TournamentService } from './modules/tournament/service.ts';
 import { LedgerService } from './modules/ledger/service.ts';
 import { FlagService } from './modules/admin/flags.ts';
+import { adminRoutes } from './modules/admin/routes.ts';
+import { AdminService } from './modules/admin/service.ts';
 import { AnalysisService } from './modules/fairplay/analysis.ts';
 import { FairPlayService } from './modules/fairplay/service.ts';
 import type { PaymentProvider } from './modules/payments/provider.ts';
@@ -29,7 +31,6 @@ import { SandboxPsp } from './modules/payments/sandbox.ts';
 import { PaymentService } from './modules/payments/service.ts';
 import { StripePsp } from './modules/payments/stripe.ts';
 import { RULES } from './infra/http/ratelimit.ts';
-import { badRequest, forbidden } from './infra/errors.ts';
 import { notFound } from './infra/errors.ts';
 
 export const WEB_DIR = join(import.meta.dirname, '..', '..', '..', 'apps', 'web', 'public');
@@ -51,6 +52,7 @@ export interface App {
   flags: FlagService;
   analysis: AnalysisService;
   fairplay: FairPlayService;
+  admin: AdminService;
   /** Yalnız PAYMENT_PROVIDER=sandbox iken. */
   sandbox: SandboxPsp | null;
   /** Dinlenen gerçek port (0 verilirse işletim sisteminin seçtiği). */
@@ -225,39 +227,9 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return { ok: true };
   });
 
-  // ---- yönetim (M13 iskeleti): şablonlar ----
-  const requireAdmin = (ctx: { requireUser(): { roles: string[] } }) => {
-    if (!ctx.requireUser().roles.includes('admin')) throw forbidden();
-  };
-  router.get('/v1/admin/tournament-templates', async (ctx) => {
-    requireAdmin(ctx);
-    return { templates: (await pool.query('SELECT * FROM tournament_templates ORDER BY created_at')).rows };
-  });
-  router.post('/v1/admin/tournament-templates', async (ctx) => {
-    requireAdmin(ctx);
-    const b = parse(
-      {
-        code: { type: 'string', pattern: /^[a-z0-9-]{3,40}$/ },
-        name: { type: 'string', min: 3, max: 80 },
-        capacity: { type: 'int', min: 4, max: 32 },
-        timeControl: { type: 'string', pattern: /^\d{1,5}\+\d{1,3}$/ },
-        readySeconds: { type: 'int', min: 5, max: 600 },
-        breakSeconds: { type: 'int', min: 0, max: 600 },
-      },
-      ctx.body,
-    );
-    if (![4, 8, 16, 32].includes(b.capacity)) throw badRequest('VALIDATION', 'Kontenjan 4, 8, 16 ya da 32 olmalı');
-    const r = await pool.query(
-      `INSERT INTO tournament_templates (code, name, kind, capacity, time_control, ready_seconds, break_seconds)
-       VALUES ($1, $2, 'free', $3, $4, $5, $6) RETURNING *`,
-      [b.code, b.name, b.capacity, b.timeControl, b.readySeconds, b.breakSeconds],
-    );
-    await pool.query(`INSERT INTO audit_log (actor_id, action, target_type, target_id, data, ip) VALUES ($1::uuid, 'template.create', 'tournament_template', $2::text, $3, $4)`,
-      [ctx.requireUser().id, (r.rows[0] as { id: string }).id, b, ctx.ip]);
-    await tournaments.ensureOpen();
-    ctx.status = 201;
-    return { template: r.rows[0] };
-  });
+  // ---- M13 yönetim ----
+  const admin = new AdminService({ pool, logger: logger.child({ part: 'admin' }), identity, tournaments, fairplay, analysis, payments, ledger, flags });
+  adminRoutes(router, { admin, fairplay, analysis, payments, tournaments, pool });
 
   const http = createServer((req, res) => void router.handle(req, res));
   http.on('upgrade', (req, socket) => {
@@ -288,6 +260,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     flags,
     analysis,
     fairplay,
+    admin,
     sandbox,
     port: cfg.port,
     async start() {

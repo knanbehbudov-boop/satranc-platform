@@ -109,6 +109,22 @@ label.check input { width: auto; margin-top: 3px; }
 .mono.neg { color: var(--crit); }
 .mono.pos { color: var(--good); }
 
+/* Yönetim */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.tabs a { text-decoration: none; padding: 6px 12px; border-radius: 8px; font-size: 14px; color: var(--muted); }
+.tabs a.on { background: var(--fg); color: var(--bg); }
+.table-wrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding: 6px 8px; white-space: nowrap; }
+.tbl td { border-bottom: 1px solid var(--line); padding: 6px 8px; vertical-align: top; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.stats .stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 2px; }
+.stats .stat.warn { border-color: var(--crit); }
+.stats .stat.warn b { color: var(--crit); }
+.stats .stat.ok b { color: var(--good); }
+.reasons { margin: 0; padding-left: 18px; font-size: 14px; }
+.h3 { margin: 6px 0 0; font: 600 13px var(--font-body); color: var(--muted); }
+
 /* Oyun */
 .game { display: grid; grid-template-columns: minmax(0, 560px) minmax(0, 1fr); gap: 20px; align-items: start; }
 @media (max-width: 900px) { .game { grid-template-columns: minmax(0, 1fr); } }

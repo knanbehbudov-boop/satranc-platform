@@ -195,7 +195,36 @@ try {
   const rep = await env.app.payments.reconcile('USD');
   check(inv.balanced && inv.negativeUserBalances === 0 && rep.ok, `Defter dengeli ve mutabakat farkı 0 (${rep.diffCents})`);
 
-  // ---- 5. Telefon genişliği ----
+  // ---- 5. Yönetim paneli: dört göz onayı tarayıcıdan ----
+  await env.app.pool.query(`UPDATE users SET roles = '{player,admin}' WHERE id = $1`, [userId]);
+  const { newPlayer } = await import(join(root, 'packages/server/test/helpers.ts'));
+  const second = await newPlayer(env.base);
+  await env.app.pool.query(`UPDATE users SET roles = '{player,admin}' WHERE id = $1`, [second.id]);
+  const victim = await newPlayer(env.base);
+  const prop = await second.client.post(`/v1/admin/users/${victim.id}/propose`, { action: 'ban', reason: 'e2e: tekrarlayan ihlal' });
+  await page.goto(env.base + '/#/');
+  await page.reload();
+  await page.waitForSelector('#nav-admin');
+  check(true, 'Yönetici rolü: menüde "Yönetim" görünüyor');
+  await page.click('#nav-admin');
+  await page.waitForSelector('#admin-body .stats');
+  check((await page.textContent('#admin-body')).includes('Bekleyen onay'), 'Yönetim genel bakış: durum kartları');
+  if (shots) await page.screenshot({ path: join(shots, 'web-yonetim.png'), fullPage: true });
+  await page.goto(env.base + '/#/yonetim/onaylar');
+  await page.waitForSelector(`[data-approve="${prop.body.approvalId}"]`);
+  await page.click(`[data-approve="${prop.body.approvalId}"]`);
+  await page.waitForFunction(() => document.querySelector('#approvals-table')?.textContent.includes('EXECUTED') || !document.querySelector('[data-approve]'), null, { timeout: 10_000 });
+  const vst = (await env.app.pool.query('SELECT status FROM users WHERE id = $1', [victim.id])).rows[0].status;
+  check(vst === 'banned', 'Dört göz: başka yöneticinin önerisi tarayıcıdan onaylandı, hesap kapatıldı');
+  if (shots) await page.screenshot({ path: join(shots, 'web-onaylar.png'), fullPage: true });
+  await page.goto(env.base + '/#/yonetim/finans');
+  await page.waitForSelector('#accounts-table');
+  check((await page.textContent('#admin-body')).includes('Defter dengeli'), 'Finans ekranı: defter dengeli, hesap tablosu');
+  await page.goto(env.base + '/#/yonetim/denetim');
+  await page.waitForSelector('#audit-table');
+  check((await page.textContent('#audit-table')).includes('approval.execute'), 'Denetim kaydında onay görünüyor');
+
+  // ---- 6. Telefon genişliği ----
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
   await phone.route('https://fonts.googleapis.com/**', (r) => r.abort());
   await phone.route('https://fonts.gstatic.com/**', (r) => r.abort());
@@ -208,6 +237,11 @@ try {
   await pp.waitForSelector('#message');
   const overflow2 = await pp.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(overflow2 <= 0, `Telefonda ödeme sayfası taşmıyor (${overflow2}px)`);
+  await pp.goto(env.base + '/#/cuzdan');
+  await pp.waitForSelector('main');
+  await sleep(300);
+  const overflow3 = await pp.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  check(overflow3 <= 0, `Telefonda cüzdan sayfası taşmıyor (${overflow3}px)`);
   if (shots) await pp.screenshot({ path: join(shots, 'web-telefon.png'), fullPage: false });
 
   check(errors.length === 0, `Tarayıcıda JavaScript hatası yok${errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''}`);
