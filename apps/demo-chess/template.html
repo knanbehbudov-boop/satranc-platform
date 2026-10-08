@@ -1,0 +1,239 @@
+<title>Satranç Çekirdeği Test Masası</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Sora:wght@500;600&display=swap">
+<style>
+/* Düzen: solda tahta (ana nesne), sağda durum → hamleler → eylemler → senaryolar; altta tarayıcı doğrulaması. Telefonda tek sütun. */
+:root {
+  --bg: #f3f5f9;
+  --surface: #ffffff;
+  --fg: #131b30;
+  --muted: #59637a;
+  --line: #d8dde8;
+  --accent: #8c6a1a;
+  --accent-soft: #f3e7c6;
+  --sq-light: #dfe5f0;
+  --sq-dark: #7d8fb4;
+  --sq-last: #e9c86a;
+  --piece-white: #fbfbfd;
+  --piece-black: #141a2b;
+  --good: #23784f;
+  --warn: #9a6512;
+  --crit: #b3362b;
+  --good-soft: #e1f2e9;
+  --crit-soft: #f8e3e0;
+  --font-display: "Sora", "IBM Plex Sans", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1322; --surface: #151d31; --fg: #e8ebf3; --muted: #9ba4ba; --line: #27314b;
+    --accent: #d8b25a; --accent-soft: #3a3220; --sq-light: #c3cbdd; --sq-dark: #56678d; --sq-last: #c9a547;
+    --piece-white: #fbfbfd; --piece-black: #0d1322;
+    --good: #5cc490; --warn: #e0a64a; --crit: #ef7b6f; --good-soft: #17352a; --crit-soft: #3d1f1d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1322; --surface: #151d31; --fg: #e8ebf3; --muted: #9ba4ba; --line: #27314b;
+  --accent: #d8b25a; --accent-soft: #3a3220; --sq-light: #c3cbdd; --sq-dark: #56678d; --sq-last: #c9a547;
+  --piece-white: #fbfbfd; --piece-black: #0d1322;
+  --good: #5cc490; --warn: #e0a64a; --crit: #ef7b6f; --good-soft: #17352a; --crit-soft: #3d1f1d;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font-body); }
+.page { max-width: 1180px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 24px; }
+
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font: 600 clamp(22px, 3vw, 28px)/1.2 var(--font-display); margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+.eyebrow { font: 500 12px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin: 0 0 6px; }
+.lede { color: var(--muted); margin: 6px 0 0; max-width: 62ch; }
+.mode { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.mode button { border: 0; background: transparent; color: var(--muted); padding: 8px 12px; border-radius: 7px; font: 500 13px var(--font-body); cursor: pointer; }
+.mode button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+
+.workbench { display: grid; grid-template-columns: minmax(0, 560px) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 900px) { .workbench { grid-template-columns: minmax(0, 1fr); } }
+
+/* Tahta */
+.board-wrap { display: grid; gap: 10px; min-width: 0; }
+.player { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); }
+.player strong { color: var(--fg); font-weight: 600; }
+.turn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 8px; visibility: hidden; }
+.player.active .turn-dot { visibility: visible; }
+.board { position: relative; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-template-rows: repeat(8, minmax(0, 1fr)); width: 100%; aspect-ratio: 1; max-width: 100%; border-radius: 6px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); user-select: none; touch-action: manipulation; }
+.sq { position: relative; border: 0; padding: 0; margin: 0; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; cursor: pointer; font-size: clamp(26px, 7.6vw, 52px); line-height: 1; }
+.sq.light { background: var(--sq-light); }
+.sq.dark { background: var(--sq-dark); }
+.sq.last::before { content: ""; position: absolute; inset: 0; background: var(--sq-last); opacity: 0.55; }
+.sq.selected::before { content: ""; position: absolute; inset: 0; background: var(--sq-last); opacity: 0.85; }
+.sq.check::after { content: ""; position: absolute; inset: 8%; border-radius: 50%; background: radial-gradient(circle, var(--crit) 0%, transparent 70%); opacity: 0.85; }
+.sq:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; z-index: 2; }
+.piece { position: relative; z-index: 1; font-family: "Segoe UI Symbol", "Noto Sans Symbols 2", "DejaVu Sans", serif; }
+.piece.w { color: var(--piece-white); text-shadow: 0 0 1px #0b1020, 0 0 1px #0b1020, 0 1px 1px #0b1020, 0 -1px 1px #0b1020, 1px 0 1px #0b1020, -1px 0 1px #0b1020; }
+.piece.b { color: var(--piece-black); text-shadow: 0 0 1px rgba(255,255,255,.35); }
+.target { position: absolute; z-index: 2; width: 28%; height: 28%; border-radius: 50%; background: var(--fg); opacity: 0.28; pointer-events: none; }
+.target.capture { width: 88%; height: 88%; background: transparent; border: 4px solid var(--fg); opacity: 0.32; }
+.coord { position: absolute; z-index: 1; font: 600 11px/1 var(--font-mono); pointer-events: none; }
+.coord.file { right: 4px; bottom: 3px; }
+.coord.rank { left: 4px; top: 4px; }
+.sq.light .coord { color: var(--sq-dark); }
+.sq.dark .coord { color: var(--sq-light); }
+.promo { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.promo-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,.18); }
+.promo-card p { margin: 0; font-size: 13px; color: var(--muted); }
+.promo-row { display: flex; gap: 8px; }
+.promo-row button { width: 60px; height: 60px; font-size: 40px; border-radius: 8px; border: 1px solid var(--line); background: var(--sq-light); cursor: pointer; }
+.promo-row button:focus-visible { outline: 3px solid var(--accent); }
+.board-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Panel */
+.panel { display: grid; gap: 16px; min-width: 0; }
+section.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+h2 { font: 600 13px/1.2 var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.status-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font: 600 13px var(--font-body); background: var(--accent-soft); color: var(--fg); }
+.pill.over { background: var(--fg); color: var(--bg); }
+.pill.check { background: var(--crit-soft); color: var(--crit); }
+.status-detail { color: var(--muted); font-size: 14px; }
+.rule-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 12px var(--font-body); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }
+.chip.on { color: var(--fg); border-color: var(--accent); }
+
+.moves { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: 36px 1fr 1fr; gap: 2px 8px; font: 14px/1.6 var(--font-mono); font-variant-numeric: tabular-nums; max-height: 220px; overflow-y: auto; }
+.moves .no { color: var(--muted); }
+.moves .latest { color: var(--accent); font-weight: 500; }
+.empty { color: var(--muted); font-size: 14px; margin: 0; }
+
+.actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.side { display: grid; gap: 6px; align-content: start; }
+.side h3 { margin: 0 0 2px; font: 600 14px var(--font-body); }
+button.btn { border: 1px solid var(--line); background: var(--surface); color: var(--fg); padding: 8px 10px; border-radius: 8px; font: 500 13px var(--font-body); cursor: pointer; text-align: left; }
+button.btn:hover { border-color: var(--fg); }
+button.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.btn:disabled { opacity: 0.45; cursor: not-allowed; border-color: var(--line); }
+button.btn.danger { color: var(--crit); }
+button.btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.msg { margin: 0; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+.msg.err { background: var(--crit-soft); color: var(--crit); }
+.msg.ok { background: var(--good-soft); color: var(--good); }
+.msg code { font: 12px var(--font-mono); }
+
+.io { display: grid; gap: 8px; }
+.io label { font-size: 13px; color: var(--muted); }
+.io-row { display: flex; gap: 8px; }
+.io input, .io textarea { flex: 1; min-width: 0; width: 100%; font: 13px/1.5 var(--font-mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.io textarea { min-height: 130px; resize: vertical; }
+.io input:focus-visible, .io textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.scenarios { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.scenarios button { display: grid; gap: 2px; }
+.scenarios button span { font-size: 12px; color: var(--muted); font-weight: 400; }
+.hint { margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 14px; }
+
+/* Doğrulama */
+.selftest { display: grid; gap: 12px; }
+.selftest-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 520px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { font: 600 12px var(--font-body); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+td.num { font: 13px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+td.res { font-weight: 600; }
+td.res.pass { color: var(--good); }
+td.res.fail { color: var(--crit); }
+td.res.wait { color: var(--muted); font-weight: 400; }
+.foot { color: var(--muted); font-size: 13px; margin: 0; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="page">
+  <header>
+    <div>
+      <p class="eyebrow">Bölüm 1 · M2 Satranç çekirdeği</p>
+      <h1>Satranç Çekirdeği Test Masası</h1>
+      <p class="lede">Bu sayfa sunucuda çalışacak kural motorunun aynısını tarayıcıda çalıştırır. Hamle yapın, senaryoları yükleyin, oyunu bitirecek her yolu deneyin.</p>
+    </div>
+    <div class="mode" role="group" aria-label="Kural seti">
+      <button id="mode-casual" type="button" aria-pressed="true">Ücretsiz oyun</button>
+      <button id="mode-paid" type="button" aria-pressed="false">Ücretli turnuva · 5+3</button>
+    </div>
+  </header>
+
+  <div class="workbench">
+    <div class="board-wrap">
+      <div class="player" id="player-top"></div>
+      <div class="board" id="board" role="grid" aria-label="Satranç tahtası"></div>
+      <div class="player" id="player-bottom"></div>
+      <div class="board-tools">
+        <button class="btn primary" id="btn-new" type="button">Yeni oyun</button>
+        <button class="btn" id="btn-flip" type="button">Tahtayı çevir</button>
+        <button class="btn" id="btn-undo" type="button">Hamleyi geri al</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <section class="card" aria-labelledby="h-status">
+        <h2 id="h-status">Durum</h2>
+        <div class="status-line"><span class="pill" id="status-pill"></span><span class="status-detail" id="status-detail"></span></div>
+        <div class="rule-chips" id="rule-chips"></div>
+        <p class="msg" id="msg" hidden></p>
+      </section>
+
+      <section class="card" aria-labelledby="h-moves">
+        <h2 id="h-moves">Hamleler</h2>
+        <ol class="moves" id="moves"></ol>
+        <p class="empty" id="moves-empty">Henüz hamle yok. Bir taşa dokunun, gidebileceği kareler işaretlenir.</p>
+      </section>
+
+      <section class="card" aria-labelledby="h-actions">
+        <h2 id="h-actions">Oyunu bitiren eylemler</h2>
+        <div class="actions" id="actions"></div>
+      </section>
+
+      <section class="card" aria-labelledby="h-scen">
+        <h2 id="h-scen">Senaryolar</h2>
+        <div class="scenarios" id="scenarios"></div>
+        <p class="hint" id="hint" hidden></p>
+      </section>
+
+      <section class="card io" aria-labelledby="h-io">
+        <h2 id="h-io">FEN ve PGN</h2>
+        <label for="fen-input">FEN (pozisyonu yükle ya da kopyala)</label>
+        <div class="io-row">
+          <input id="fen-input" type="text" spellcheck="false" autocomplete="off">
+          <button class="btn" id="btn-fen-load" type="button">Yükle</button>
+          <button class="btn" id="btn-fen-copy" type="button">Kopyala</button>
+        </div>
+        <label for="pgn-output">PGN (oyunun arşiv kaydı; yapıştırıp yükleyebilirsiniz)</label>
+        <textarea id="pgn-output" spellcheck="false"></textarea>
+        <div class="io-row"><button class="btn" id="btn-pgn-load" type="button">PGN'i yükle ve yeniden oynat</button></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card selftest" aria-labelledby="h-self">
+    <div class="selftest-head">
+      <h2 id="h-self">Tarayıcıda doğrulama: perft</h2>
+      <button class="btn" id="btn-selftest" type="button">Yeniden çalıştır</button>
+    </div>
+    <p class="foot">Perft, bir pozisyondan belirli derinlikte oynanabilecek tüm hamle dizilerini sayar. Sayılar satranç programcılığında kanıtlanmış değerlerdir; tek bir eksik ya da fazla hamle kuralı sonucu bozar. Aynı test sunucuda da çalışır.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Pozisyon</th><th>Derinlik</th><th style="text-align:right">Beklenen</th><th style="text-align:right">Bulunan</th><th style="text-align:right">Süre</th><th>Sonuç</th></tr></thead>
+        <tbody id="selftest-body"></tbody>
+      </table>
+    </div>
+    <p class="foot" id="selftest-summary"></p>
+  </section>
+</div>
+
+<script>
+/*__CORE__*/
+</script>
+<script>
+/*__APP__*/
+</script>

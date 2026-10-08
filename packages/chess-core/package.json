@@ -1,0 +1,13 @@
+{
+  "name": "@satranc/chess-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M2 — Satranç kuralları, FEN/SAN/UCI/PGN, zaman kontrolü ve kural setleri. Bağımlılıksız ve saf.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}

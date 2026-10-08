@@ -1,0 +1,25 @@
+{
+  "name": "satranc-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Çevrimiçi satranç turnuva platformu — modüler monolit",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test \"packages/*/test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json",
+    "build:demo": "node scripts/build-demo.mjs",
+    "test:browser": "node scripts/browser-check.mjs",
+    "check": "npm run typecheck && npm test && npm run build:demo && npm run test:browser"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.8.0",
+    "playwright": "^1.56.0"
+  }
+}
