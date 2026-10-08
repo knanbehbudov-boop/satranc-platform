@@ -116,7 +116,7 @@ describe('ödeme yapılandırması', () => {
       Object.assign(process.env, old);
     }
   };
-  const prodBase = { NODE_ENV: 'production', DATABASE_URL: 'postgres://x@y/z', JWT_SECRET: 'x'.repeat(40), PSP_WEBHOOK_SECRET: 'whsec_x', DEV_MAILBOX: '0', STOCKFISH_PATH: '/usr/games/stockfish' };
+  const prodBase = { NODE_ENV: 'production', DATABASE_URL: 'postgres://x@y/z', JWT_SECRET: 'x'.repeat(40), PSP_WEBHOOK_SECRET: 'whsec_x', DEV_MAILBOX: '0', STOCKFISH_PATH: process.execPath }; // var olan bir dosya (yol denetimi geçsin)
 
   it('üretimde sandbox sağlayıcısı reddedilir', () => {
     withEnv({ ...prodBase, PAYMENT_PROVIDER: 'sandbox' }, () => assert.throws(() => loadConfig(), /Sandbox ödeme sağlayıcısı üretimde/));
