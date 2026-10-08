@@ -1,0 +1,27 @@
+:root { --bg: #f4f5f9; --card: #fff; --ink: #1d2230; --muted: #687087; --accent: #5b4bdb; --err: #c0392b; --ok: #1e8e5a; --line: #dfe2ea; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11131a; --card: #1b1e28; --ink: #e8eaf2; --muted: #9aa1b5; --line: #2c3040; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px; }
+.card { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,.08); }
+.brand { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 8px; }
+.dot { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); display: inline-block; }
+.tag { font-size: 11px; font-weight: 600; background: #f6c343; color: #3a2a00; border-radius: 4px; padding: 1px 6px; }
+.muted { color: var(--muted); font-size: 13px; }
+.summary { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 14px 0; display: flex; justify-content: space-between; gap: 12px; }
+.amount { font-weight: 700; font-size: 18px; white-space: nowrap; }
+label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; flex: 1; }
+input { display: block; width: 100%; margin-top: 4px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--ink); font-size: 16px; }
+.row { display: flex; gap: 12px; }
+button { width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; font-size: 15px; cursor: pointer; }
+button:disabled { opacity: .6; cursor: wait; }
+button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.message { min-height: 22px; margin-top: 12px; font-size: 14px; }
+.message.err { color: var(--err); }
+.message.ok { color: var(--ok); }
+.back { display: inline-block; margin-top: 8px; color: var(--accent); }
+.cards { margin-top: 18px; font-size: 13px; }
+.cards ul { padding-left: 18px; margin: 8px 0; }
+.hidden { display: none !important; }
+h2 { font-size: 16px; margin: 8px 0 4px; }

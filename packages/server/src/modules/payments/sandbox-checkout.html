@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox Ödeme</title>
+  <link rel="stylesheet" href="/sandbox-psp/checkout.css">
+  <script src="/sandbox-psp/checkout.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><span class="dot"></span> SandboxPay <span class="tag">TEST MODU</span></div>
+    <p class="muted">Bu sayfa ödeme sağlayıcısına aittir. Kart bilgileriniz satranç platformuna iletilmez.</p>
+
+    <section id="summary" class="summary">
+      <div id="desc" class="desc">Yükleniyor…</div>
+      <div id="amount" class="amount"></div>
+    </section>
+
+    <form id="pay-form" class="hidden" autocomplete="off">
+      <label>Kart numarası
+        <input id="card" inputmode="numeric" placeholder="4242 4242 4242 4242" maxlength="23" required>
+      </label>
+      <div class="row">
+        <label>Son kullanma (AA/YY)
+          <input id="exp" placeholder="12/30" maxlength="5" required>
+        </label>
+        <label>CVC
+          <input id="cvc" inputmode="numeric" placeholder="123" maxlength="4" required>
+        </label>
+      </div>
+      <button id="pay-btn" type="submit">Öde</button>
+    </form>
+
+    <section id="three-ds" class="hidden">
+      <h2>3D Secure doğrulaması</h2>
+      <p class="muted">Bankanız bu ödemeyi onaylamanızı istiyor (test).</p>
+      <div class="row">
+        <button id="approve-3ds" type="button">Onayla</button>
+        <button id="reject-3ds" type="button" class="secondary">Reddet</button>
+      </div>
+    </section>
+
+    <div id="message" class="message" role="status"></div>
+    <a id="back" class="back hidden" href="/">Siteye dön</a>
+
+    <details class="cards">
+      <summary>Test kartları</summary>
+      <ul>
+        <li><code>4242 4242 4242 4242</code> başarılı</li>
+        <li><code>4000 0000 0000 3220</code> 3D Secure ister</li>
+        <li><code>4000 0000 0000 0002</code> reddedilir</li>
+        <li><code>4000 0000 0000 9995</code> yetersiz bakiye</li>
+      </ul>
+      <p class="muted">Herhangi bir gelecek tarih ve 3 haneli CVC.</p>
+    </details>
+  </main>
+</body>
+</html>

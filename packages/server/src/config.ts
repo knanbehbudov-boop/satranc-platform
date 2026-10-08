@@ -31,6 +31,17 @@ export interface Config {
   minAge: number;
   /** Aynı IP'den saatlik kayıt sınırı (çoklu hesap açmayı yavaşlatır). */
   registrationsPerHourPerIp: number;
+  /** M7: ödeme sağlayıcısı. 'sandbox' yalnız geliştirme/test içindir; üretimde reddedilir. */
+  paymentProvider: 'sandbox' | 'stripe';
+  /** Webhook imza anahtarı (Stripe: whsec_…). */
+  pspWebhookSecret: string;
+  stripeSecretKey: string | null;
+  stripeApiBase: string;
+  /** Uygulamanın dışarıdan görünen adresi (ödeme dönüş adresleri). Boşsa istek adresi kullanılır. */
+  publicBaseUrl: string | null;
+  /** Sandbox webhook teslim gecikmesi ve yineleme olasılığı (dayanıklılık testi). */
+  sandboxDeliveryDelayMs: number;
+  sandboxDuplicateRate: number;
 }
 
 function num(name: string, fallback: number): number {
@@ -74,9 +85,22 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     serveWeb: bool('SERVE_WEB', true),
     minAge: num('MIN_AGE', 18),
     registrationsPerHourPerIp: num('REGISTRATIONS_PER_HOUR_PER_IP', prod ? 5 : 100),
+    paymentProvider: (process.env.PAYMENT_PROVIDER as Config['paymentProvider'] | undefined) ?? (prod ? 'stripe' : 'sandbox'),
+    pspWebhookSecret: required('PSP_WEBHOOK_SECRET', 'whsec_gelistirme_sandbox_anahtari'),
+    stripeSecretKey: process.env.STRIPE_SECRET_KEY || null,
+    stripeApiBase: process.env.STRIPE_API_BASE ?? 'https://api.stripe.com',
+    publicBaseUrl: process.env.PUBLIC_BASE_URL || null,
+    sandboxDeliveryDelayMs: num('SANDBOX_DELIVERY_DELAY_MS', 300),
+    sandboxDuplicateRate: num('SANDBOX_DUPLICATE_RATE', 0.2),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');
   if (prod && cfg.devMailbox) throw new Error('DEV_MAILBOX üretimde açılamaz');
+  if (!['sandbox', 'stripe'].includes(cfg.paymentProvider)) throw new Error('PAYMENT_PROVIDER sandbox ya da stripe olmalı');
+  if (prod && cfg.paymentProvider === 'sandbox') throw new Error('Sandbox ödeme sağlayıcısı üretimde kullanılamaz');
+  if (cfg.paymentProvider === 'stripe') {
+    if (!cfg.stripeSecretKey) throw new Error('PAYMENT_PROVIDER=stripe için STRIPE_SECRET_KEY gerekli');
+    if (!cfg.publicBaseUrl) throw new Error('PAYMENT_PROVIDER=stripe için PUBLIC_BASE_URL gerekli');
+  }
   return cfg;
 }

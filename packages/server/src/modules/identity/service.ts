@@ -335,6 +335,24 @@ export class IdentityService {
     return u;
   }
 
+  /**
+   * Hesabı dondurur (ters ibraz, hile şüphesi, yönetici kararı). Açık oturumlar
+   * sessionActive kontrolüyle düşer; aynı işlemde denetim kaydı yazılır.
+   */
+  async setStatus(q: Queryable, userId: string, status: 'active' | 'frozen' | 'banned', reason: string, actorId: string | null): Promise<boolean> {
+    const cur = await q.query<{ status: string }>('SELECT status FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const old = cur.rows[0]?.status;
+    // Kendini dışlama yalnız kullanıcının kendi süreciyle kalkar (doküman 5.10).
+    if (!old || old === status || old === 'self_excluded') return false;
+    await q.query('UPDATE users SET status = $2 WHERE id = $1', [userId, status]);
+    await q.query(
+      `INSERT INTO audit_log (actor_id, action, target_type, target_id, data) VALUES ($1::uuid, $2, 'user', $3::text, $4)`,
+      [actorId, `user.${status}`, userId, { reason, from: old }],
+    );
+    await publish(q, 'user.status', { userId, status, reason });
+    return true;
+  }
+
   private async recordDevice(userId: string, meta: RequestMeta): Promise<string | null> {
     if (!meta.deviceKey) return null;
     const r = await this.pool.query<{ id: string }>(

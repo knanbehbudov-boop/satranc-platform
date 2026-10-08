@@ -16,12 +16,26 @@ export interface AuthUser {
   sessionId: string;
 }
 
+/** JSON yerine ham içerik döndürmek için (HTML sayfası, betik). */
+export class RawResponse {
+  readonly contentType: string;
+  readonly body: string | Buffer;
+  readonly status: number;
+  constructor(contentType: string, body: string | Buffer, status = 200) {
+    this.contentType = contentType;
+    this.body = body;
+    this.status = status;
+  }
+}
+
 export interface Ctx {
   req: IncomingMessage;
   res: ServerResponse;
   params: Record<string, string>;
   query: URLSearchParams;
   body: unknown;
+  /** Ham istek gövdesi (webhook imza doğrulaması için). */
+  rawBody: Buffer;
   ip: string;
   /** İstemcinin localStorage'da tuttuğu cihaz anahtarı (X-Device-Id). */
   deviceKey: string | null;
@@ -142,8 +156,8 @@ export class Router {
     return methodMismatch ? 'method' : null;
   }
 
-  private async readBody(req: IncomingMessage): Promise<unknown> {
-    if (req.method === 'GET' || req.method === 'HEAD') return undefined;
+  private async readBody(req: IncomingMessage): Promise<{ parsed: unknown; raw: Buffer }> {
+    if (req.method === 'GET' || req.method === 'HEAD') return { parsed: undefined, raw: Buffer.alloc(0) };
     const max = this.opts.maxBodyBytes ?? 64 * 1024;
     const chunks: Buffer[] = [];
     let size = 0;
@@ -152,11 +166,12 @@ export class Router {
       if (size > max) throw new AppError(413, 'BODY_TOO_LARGE', 'İstek gövdesi çok büyük');
       chunks.push(chunk as Buffer);
     }
-    if (!size) return {};
+    if (!size) return { parsed: {}, raw: Buffer.alloc(0) };
     const ct = req.headers['content-type'] ?? '';
     if (!ct.includes('application/json')) throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'İçerik türü application/json olmalı');
+    const raw = Buffer.concat(chunks);
     try {
-      return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return { parsed: JSON.parse(raw.toString('utf8')), raw };
     } catch {
       throw new AppError(400, 'INVALID_JSON', 'Geçersiz JSON');
     }
@@ -200,12 +215,14 @@ export class Router {
       const authz = req.headers.authorization;
       const user = authz?.startsWith('Bearer ') ? this.opts.authenticate(authz.slice(7)) : null;
       const setCookies: string[] = [];
+      const body = await this.readBody(req);
       const ctx: Ctx = {
         req,
         res,
         params: m.params,
         query: url.searchParams,
-        body: await this.readBody(req),
+        body: body.parsed,
+        rawBody: body.raw,
         ip,
         deviceKey: ((req.headers['x-device-id'] as string | undefined) ?? '').slice(0, 64) || null,
         userAgent: ((req.headers['user-agent'] as string | undefined) ?? '').slice(0, 300),
@@ -236,6 +253,14 @@ export class Router {
       const data = await m.route.handler(ctx);
       if (setCookies.length) res.setHeader('Set-Cookie', setCookies);
       for (const [k, v] of Object.entries(ctx.headers)) res.setHeader(k, v);
+      if (data instanceof RawResponse) {
+        status = data.status;
+        res.statusCode = status;
+        res.setHeader('Content-Type', data.contentType);
+        res.setHeader('Cache-Control', 'no-store');
+        res.end(data.body);
+        return;
+      }
       status = data === undefined ? 204 : ctx.status;
       res.statusCode = status;
       res.setHeader('Cache-Control', 'no-store');

@@ -20,6 +20,11 @@ import { isUuid, parse } from './infra/http/validate.ts';
 import { BotService } from './modules/bot/service.ts';
 import { RatingService } from './modules/rating/service.ts';
 import { TournamentService } from './modules/tournament/service.ts';
+import { LedgerService } from './modules/ledger/service.ts';
+import type { PaymentProvider } from './modules/payments/provider.ts';
+import { SandboxPsp } from './modules/payments/sandbox.ts';
+import { PaymentService } from './modules/payments/service.ts';
+import { StripePsp } from './modules/payments/stripe.ts';
 import { RULES } from './infra/http/ratelimit.ts';
 import { badRequest, forbidden } from './infra/errors.ts';
 import { notFound } from './infra/errors.ts';
@@ -38,6 +43,10 @@ export interface App {
   bots: BotService;
   ratings: RatingService;
   tournaments: TournamentService;
+  ledger: LedgerService;
+  payments: PaymentService;
+  /** Yalnız PAYMENT_PROVIDER=sandbox iken. */
+  sandbox: SandboxPsp | null;
   /** Dinlenen gerçek port (0 verilirse işletim sisteminin seçtiği). */
   port: number;
   start(): Promise<void>;
@@ -53,6 +62,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   }
 
   const events = new OutboxDispatcher(pool, logger.child({ part: 'outbox' }));
+  const ledger = new LedgerService(pool);
   const identity = new IdentityService(pool, cfg);
   const limiter = new RateLimiter();
   const router = new Router({
@@ -177,6 +187,36 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return { template: r.rows[0] };
   });
 
+  // ---- M7 ödeme ----
+  let sandbox: SandboxPsp | null = null;
+  let provider: PaymentProvider;
+  if (cfg.paymentProvider === 'sandbox') {
+    sandbox = new SandboxPsp({
+      pool,
+      logger: logger.child({ part: 'sandbox-psp' }),
+      webhookSecret: cfg.pspWebhookSecret,
+      // Sandbox aynı süreçte çalışır; webhook'u gerçek HTTP isteğiyle kendi adresimize gönderir.
+      webhookUrl: () => `http://127.0.0.1:${app.port}/v1/webhooks/psp`,
+      options: { deliveryDelayMs: cfg.sandboxDeliveryDelayMs, duplicateRate: cfg.sandboxDuplicateRate },
+    });
+    sandbox.routes(router);
+    provider = sandbox;
+  } else {
+    provider = new StripePsp({
+      secretKey: cfg.stripeSecretKey as string,
+      webhookSecret: cfg.pspWebhookSecret,
+      publicBaseUrl: cfg.publicBaseUrl as string,
+      apiBase: cfg.stripeApiBase,
+    });
+  }
+  const payments = new PaymentService({ pool, logger: logger.child({ part: 'payments' }), provider, ledger, identity });
+  router.post('/v1/webhooks/psp', async (ctx) => {
+    const r = await payments.handleWebhook(ctx.rawBody, ctx.req.headers);
+    return { received: true, duplicate: r.duplicate };
+  });
+  router.get('/v1/payments/:id', async (ctx) => payments.getForUser(ctx.requireUser().id, ctx.params.id as string));
+  router.get('/v1/me/payments', async (ctx) => ({ payments: await payments.listForUser(ctx.requireUser().id) }));
+
   const http = createServer((req, res) => void router.handle(req, res));
   http.on('upgrade', (req, socket) => {
     if (!req.url?.startsWith('/v1/ws')) {
@@ -201,18 +241,25 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     bots,
     ratings,
     tournaments,
+    ledger,
+    payments,
+    sandbox,
     port: cfg.port,
     async start() {
       await new Promise<void>((resolve) => http.listen(cfg.port, cfg.host, resolve));
       const addr = http.address();
       app.port = typeof addr === 'object' && addr ? addr.port : cfg.port;
       events.start();
+      payments.start();
+      sandbox?.start();
       await games.start();
       await tournaments.start();
       logger.info('Sunucu hazır', { url: `http://${cfg.host}:${app.port}` });
     },
     async stop() {
       events.stop();
+      payments.stop();
+      sandbox?.stop();
       tournaments.stop();
       games.stop();
       bots.stop();
