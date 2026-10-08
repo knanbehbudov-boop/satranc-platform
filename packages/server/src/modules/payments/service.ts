@@ -50,8 +50,9 @@ interface RefundRow {
 
 export interface CreatePaymentInput {
   userId: string;
-  tournamentId: string;
-  entryId: string;
+  /** Turnuva koltuğu dışında bir ödeme için boş bırakılır (bu durumda turnuva modülü olayı yok sayar). */
+  tournamentId: string | null;
+  entryId: string | null;
   amountCents: number;
   currency: string;
   /** Aynı anahtar aynı ödemeyi döndürür (çift tıklama, yeniden deneme). */
@@ -120,7 +121,7 @@ export class PaymentService {
       amountCents: row.amount_cents,
       currency: row.currency,
       idempotencyKey: `payment:${row.id}`,
-      metadata: { paymentId: row.id, userId: input.userId, tournamentId: input.tournamentId, entryId: input.entryId, description: input.description },
+      metadata: { paymentId: row.id, userId: input.userId, tournamentId: input.tournamentId ?? '', entryId: input.entryId ?? '', description: input.description },
       returnUrl: input.returnUrl(row.id),
     });
     await this.pool.query(

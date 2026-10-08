@@ -24,7 +24,7 @@ const check = (ok, label) => {
   if (!ok) failures.push(label);
 };
 
-const env = await startTestApp({ firstMoveTimeoutMs: 60_000 });
+const env = await startTestApp({ firstMoveTimeoutMs: 60_000, paidMinRatedGames: 0, prizeHoldSec: 3, sandboxDeliveryDelayMs: 200, sandboxDuplicateRate: 0.5 });
 env.app.tournaments.firstGameDelayMs = 0;
 env.app.bots.humanDelay = false;
 const browser = await playwright.chromium.launch();
@@ -89,6 +89,36 @@ try {
   // Tarayıcıdaki kullanıcı en güçlü; senaryolu oyuncular ona kaybeder.
   const userId = (await env.app.pool.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email])).rows[0].id;
   const strength = new Map([[userId, 100]]);
+
+  /** Kullanıcı oyunlarını tahtaya tıklayarak oynar; turnuva bitene (SETTLING/SETTLED) kadar. */
+  async function playThrough(tid) {
+    const deadline = Date.now() + 120_000;
+    const gamesPlayed = new Set();
+    for (;;) {
+      if (Date.now() > deadline) throw new Error('Turnuva zamanında bitmedi');
+      const d = await env.app.tournaments.detail(tid);
+      if (d.status === 'SETTLED' || d.status === 'SETTLING') break;
+      const hash = await page.evaluate(() => location.hash);
+      const m = /^#\/oyun\/([0-9a-f-]{36})/.exec(hash);
+      if (m) {
+        const state = await env.app.games.state(m[1]);
+        const myColor = state.players.w.id === userId ? 'w' : state.players.b.id === userId ? 'b' : null;
+        if (state.status === 'active' && myColor && state.turn === myColor) {
+          gamesPlayed.add(m[1]);
+          const g = new ChessGame({ fen: state.fen });
+          const mv = g.moves().find((x) => !x.captured && !x.san.includes('#') && !x.promotion) ?? g.moves()[0];
+          await page.waitForSelector(`.sq[data-square="${mv.from}"]`);
+          await page.click(`.sq[data-square="${mv.from}"]`);
+          await page.click(`.sq[data-square="${mv.to}"]`);
+          if (mv.promotion) await page.click('#promo-q');
+          await sleep(300);
+          continue;
+        }
+      }
+      await sleep(250);
+    }
+    return gamesPlayed;
+  }
   const bots = [];
   for (let i = 0; i < 3; i++) {
     const p = await ScriptedPlayer.create(env.base, (g) => ((strength.get(p.id) ?? 0) > (strength.get(g.opponentId) ?? 0) ? 'win' : 'lose'));
@@ -104,32 +134,7 @@ try {
   await page.click('#ready');
   check(true, 'Turnuva doldu, "Hazırım" düğmesi çıktı ve tıklandı');
 
-  // Kullanıcı oyunlarını tahtaya tıklayarak oynar.
-  const deadline = Date.now() + 120_000;
-  let gamesPlayed = new Set();
-  for (;;) {
-    if (Date.now() > deadline) throw new Error('Turnuva zamanında bitmedi');
-    const d = await env.app.tournaments.detail(tid);
-    if (d.status === 'SETTLED') break;
-    const hash = await page.evaluate(() => location.hash);
-    const m = /^#\/oyun\/([0-9a-f-]{36})/.exec(hash);
-    if (m) {
-      const state = await env.app.games.state(m[1]);
-      const myColor = state.players.w.id === userId ? 'w' : state.players.b.id === userId ? 'b' : null;
-      if (state.status === 'active' && myColor && state.turn === myColor) {
-        gamesPlayed.add(m[1]);
-        const g = new ChessGame({ fen: state.fen });
-        const mv = g.moves().find((x) => !x.captured && !x.san.includes('#') && !x.promotion) ?? g.moves()[0];
-        await page.waitForSelector(`.sq[data-square="${mv.from}"]`);
-        await page.click(`.sq[data-square="${mv.from}"]`);
-        await page.click(`.sq[data-square="${mv.to}"]`);
-        if (mv.promotion) await page.click('#promo-q');
-        await sleep(300);
-        continue;
-      }
-    }
-    await sleep(250);
-  }
+  let gamesPlayed = await playThrough(tid);
   check(gamesPlayed.size === 4, `Kullanıcı tahtaya tıklayarak ${gamesPlayed.size} turnuva oyunu oynadı (2 maç × 2)`);
   await page.goto(env.base + `/#/turnuva/${tid}`);
   await page.waitForSelector('#bracket .match');
@@ -141,7 +146,56 @@ try {
   check((await page.textContent('#verify-result')).startsWith('Doğrulandı'), 'Adil eşleştirme doğrulaması sayfada geçti');
   if (shots) await page.screenshot({ path: join(shots, 'web-turnuva.png'), fullPage: true });
 
-  // ---- 4. Telefon genişliği ----
+  // ---- 4. Ücretli turnuva: ödeme sayfası (3D Secure) → koltuk → oyun → ödül → cüzdan ----
+  const pcode = uniqueName('e2epaid').toLowerCase();
+  await env.app.pool.query(
+    `INSERT INTO tournament_templates (code, name, kind, capacity, entry_fee_cents, currency, rake_bps, time_control, ready_seconds, break_seconds)
+     VALUES ($1, 'Ücretli Uçtan Uca', 'sng', 4, 500, 'USD', 1200, '180+2', 30, 0)`, [pcode]);
+  await env.app.tournaments.ensureOpen();
+  const ptid = (await env.app.pool.query(`SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id WHERE p.code = $1 AND t.status = 'OPEN'`, [pcode])).rows[0].id;
+  for (const b of bots) {
+    const j = await b.client.post(`/v1/tournaments/${ptid}/join`);
+    const u = new URL(j.body.checkoutUrl, env.base);
+    await b.client.post(`/sandbox-psp/v1/checkout/${u.pathname.split('/').pop()}/pay`, { secret: u.searchParams.get('secret'), card: '4242424242424242', exp: '12/39', cvc: '123' });
+  }
+  await page.goto(env.base + '/#/');
+  await page.waitForSelector(`[data-join="${ptid}"]`);
+  check((await page.textContent(`[data-join="${ptid}"]`)).includes('5,00'), 'Lobide ücretli turnuva: katıl düğmesinde ücret');
+  page.once('dialog', (dlg) => void dlg.accept());
+  await page.click(`[data-join="${ptid}"]`);
+  await page.waitForURL(/\/sandbox-psp\/checkout\//);
+  await page.waitForSelector('#pay-form:not(.hidden)');
+  check((await page.textContent('#amount')).includes('5,00'), 'Ödeme sağlayıcısının sayfası açıldı, tutar doğru');
+  await page.fill('#card', '4000000000003220');
+  await page.fill('#exp', '1239');
+  await page.fill('#cvc', '123');
+  if (shots) await page.screenshot({ path: join(shots, 'web-odeme.png'), fullPage: true });
+  await page.click('#pay-btn');
+  await page.waitForSelector('#three-ds:not(.hidden)');
+  check(true, 'Test kartı 3D Secure istedi');
+  await page.click('#approve-3ds');
+  await page.waitForURL(new RegExp(`#/turnuva/${ptid}`), { timeout: 10_000 });
+  await page.waitForSelector('#ready', { timeout: 15_000 });
+  check(true, 'Ödemeden sonra siteye dönüldü; webhook koltuğu onayladı ve turnuva doldu');
+  const payMsg = await page.locator('#pay-msg').textContent().catch(() => '');
+  check(!payMsg || payMsg.includes('Ödeme alındı'), `Dönüş sayfasında ödeme durumu sunucudan okundu (${payMsg || 'hazır olma ekranı'})`);
+  await page.click('#ready');
+  const paidGames = await playThrough(ptid);
+  check(paidGames.size >= 4, `Ücretli turnuvada ${paidGames.size} oyun tahtadan oynandı`);
+  await page.goto(env.base + `/#/turnuva/${ptid}`);
+  await page.waitForSelector('#prizes li');
+  check((await page.textContent('#prizes')).includes('12,32'), 'Turnuva sayfası: şampiyon ödülü 12,32 $ (4 × 5 $, %12 komisyon)');
+  if (shots) await page.screenshot({ path: join(shots, 'web-odul.png'), fullPage: true });
+  await page.goto(env.base + '/#/cuzdan');
+  await page.waitForFunction(() => document.querySelector('[data-available="USD"]')?.textContent.includes('12,32'), null, { timeout: 20_000 });
+  check(true, 'Cüzdan: bekletme bitince 12,32 $ çekilebilir bakiyede');
+  check((await page.textContent('#payment-list')).includes('ödendi'), 'Cüzdan: ödeme listesinde giriş ücreti görünüyor');
+  if (shots) await page.screenshot({ path: join(shots, 'web-cuzdan.png'), fullPage: true });
+  const inv = await env.app.ledger.invariants();
+  const rep = await env.app.payments.reconcile('USD');
+  check(inv.balanced && inv.negativeUserBalances === 0 && rep.ok, `Defter dengeli ve mutabakat farkı 0 (${rep.diffCents})`);
+
+  // ---- 5. Telefon genişliği ----
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
   await phone.route('https://fonts.googleapis.com/**', (r) => r.abort());
   await phone.route('https://fonts.gstatic.com/**', (r) => r.abort());
@@ -150,6 +204,10 @@ try {
   await pp.waitForSelector('#bracket .match');
   const overflow = await pp.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(overflow <= 0, `Telefonda yatay taşma yok (${overflow}px)`);
+  await pp.goto(env.base + '/sandbox-psp/checkout/yok?secret=x');
+  await pp.waitForSelector('#message');
+  const overflow2 = await pp.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  check(overflow2 <= 0, `Telefonda ödeme sayfası taşmıyor (${overflow2}px)`);
   if (shots) await pp.screenshot({ path: join(shots, 'web-telefon.png'), fullPage: false });
 
   check(errors.length === 0, `Tarayıcıda JavaScript hatası yok${errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''}`);

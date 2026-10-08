@@ -44,6 +44,43 @@
     agreement: 'Anlaşmalı beraberlik', abandon: 'Oyunu terk etti', forfeit: 'Hükmen (zamanında oynamadı)', adjudication: 'Hakem kararı',
   };
 
+  /** Tutarlar her yerde tamsayı cent; gösterimde biçimlenir. */
+  function money(cents, cur) {
+    try { return new Intl.NumberFormat('tr-TR', { style: 'currency', currency: cur || 'USD' }).format((cents || 0) / 100); }
+    catch { return `${((cents || 0) / 100).toFixed(2)} ${cur}`; }
+  }
+  const fmtTime = (iso) => new Date(iso).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const rankLabel = (rank, count) => (count > 1 ? `${rank}.–${rank + count - 1}.` : `${rank}.`);
+  const ORPHAN_REASON = {
+    seat_unavailable: 'Koltuğun artık yoktu (rezervasyon süresi dolmuş olabilir)',
+    tournament_not_open: 'Turnuva kayıtları kapanmıştı',
+    amount_mismatch: 'Ödenen tutar beklenenle uyuşmadı',
+  };
+  const PAY_FAIL = { card_declined: 'Kart reddedildi', insufficient_funds: 'Yetersiz bakiye', authentication_failed: '3D Secure doğrulanamadı' };
+
+  /** Ücretli turnuvaya katıl: koltuk 10 dk ayrılır ve ödeme sağlayıcısının sayfasına gidilir. */
+  async function joinTournament(t) {
+    if (t.entryFeeCents > 0 && !confirm(`${t.name}\nGiriş ücreti ${money(t.entryFeeCents, t.currency)}. Koltuğun 10 dakika ayrılacak ve ödeme sayfasına yönlendirileceksin. Devam edilsin mi?`)) return;
+    try {
+      const r = await api('POST', `/v1/tournaments/${t.id}/join`, {});
+      if (r.status === 'RESERVED') {
+        if (r.checkoutUrl) location.href = r.checkoutUrl;
+        else { toast('Koltuğun ayrıldı fakat ödeme sayfası açılamadı. Turnuva sayfasından tekrar dene.'); location.hash = `#/turnuva/${t.id}`; }
+        return;
+      }
+      location.hash = `#/turnuva/${t.id}`;
+    } catch (e) {
+      toast(e.code === 'NOT_ENOUGH_RATED_GAMES' ? `${e.message}. Ücretsiz turnuvalarda oynayarak tamamlayabilirsin.` : e.message);
+    }
+  }
+
+  async function resumePayment(id) {
+    try {
+      const r = await api('POST', `/v1/tournaments/${id}/pay`, {});
+      if (r.checkoutUrl) location.href = r.checkoutUrl;
+    } catch (e) { toast(e.message); }
+  }
+
   function toast(text, link) {
     const t = el('div', { class: 'toast', role: 'status' }, el('div', {}, text), link ? el('a', { href: link.href }, link.text) : null);
     const box = document.getElementById('toasts');
@@ -203,6 +240,18 @@
     } else if (m.type === 'game.started') {
       if (m.matchId && !matchTournament.has(m.matchId)) matchTournament.set(m.matchId, null);
       if (!location.hash.startsWith(`#/oyun/${m.gameId}`)) location.hash = `#/oyun/${m.gameId}`;
+    } else if (m.type === 'payment.confirmed') {
+      toast('Ödemen alındı, koltuğun onaylandı.', { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuvaya git' });
+    } else if (m.type === 'payment.orphaned') {
+      toast(`${ORPHAN_REASON[m.reason] || 'Ödemen koltuğa bağlanamadı'}. Ücretin otomatik olarak iade ediliyor.`, { href: '#/cuzdan', text: 'Cüzdan' });
+    } else if (m.type === 'payment.failed') {
+      toast(`Ödeme başarısız: ${PAY_FAIL[m.reason] || m.reason || 'bilinmeyen neden'}. Rezervasyon süresi içinde tekrar deneyebilirsin.`);
+    } else if (m.type === 'reservation.expired') {
+      toast('Ödeme süresi doldu; koltuğun bırakıldı.', { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuva' });
+    } else if (m.type === 'prize.awarded') {
+      toast(`Tebrikler! ${m.rank}. oldun: ${money(m.cents, m.currency)}. Ödül ${fmtTime(m.holdUntil)} tarihine kadar güvenlik incelemesinde bekler.`, { href: '#/cuzdan', text: 'Cüzdan' });
+    } else if (m.type === 'prize.released') {
+      toast(`${money(m.cents, m.currency)} ödülün çekilebilir bakiyene geçti.`, { href: '#/cuzdan', text: 'Cüzdan' });
     } else if (m.type === 'tournament.readyCheck') {
       toast(`Turnuva doldu. ${m.readySeconds} saniye içinde "Hazırım" de.`, { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuvaya git' });
       if (!location.hash.startsWith(`#/turnuva/${m.tournamentId}`)) location.hash = `#/turnuva/${m.tournamentId}`;
@@ -216,6 +265,7 @@
     if (session.user) {
       nav.replaceChildren(
         el('a', { href: '#/' }, 'Lobi'),
+        el('a', { href: '#/cuzdan', id: 'nav-wallet' }, 'Cüzdan'),
         el('span', { class: 'who' }, session.user.displayName),
         el('button', { class: 'btn', type: 'button', onclick: logout }, 'Çıkış'),
       );
@@ -239,7 +289,8 @@
       if (parts[0] === 'kayit') return registerView();
       if (parts[0] === 'dogrula') return verifyView(params.get('token'));
       if (parts[0] === 'oyun' && parts[1]) return (cleanup = gameView(parts[1]));
-      if (parts[0] === 'turnuva' && parts[1]) return (cleanup = tournamentView(parts[1]));
+      if (parts[0] === 'turnuva' && parts[1]) return (cleanup = tournamentView(parts[1], params));
+      if (parts[0] === 'cuzdan') return (cleanup = await walletView());
       return (cleanup = await lobbyView());
     } catch (e) {
       mount(el('p', { class: 'msg err' }, e.message || String(e)));
@@ -372,19 +423,14 @@
         const seats = el('span', { class: 'seats', 'aria-label': `${t.joined}/${t.capacity} dolu` }, Array.from({ length: Math.min(t.capacity, 16) }, (_, i) => el('i', { class: i < Math.round((t.joined / t.capacity) * Math.min(t.capacity, 16)) ? 'on' : '' })));
         const mine = active === t.id;
         const action = t.status === 'OPEN' && session.user && !active
-          ? el('button', { class: 'btn accent', type: 'button', dataset: { join: t.id }, onclick: async () => {
-            try {
-              await api('POST', `/v1/tournaments/${t.id}/join`, {});
-              location.hash = `#/turnuva/${t.id}`;
-            } catch (e) { toast(e.message); }
-          } }, 'Katıl')
+          ? el('button', { class: 'btn accent', type: 'button', dataset: { join: t.id }, onclick: () => joinTournament(t) }, t.entryFeeCents ? `Katıl · ${money(t.entryFeeCents, t.currency)}` : 'Katıl')
           : el('a', { class: 'btn', href: `#/turnuva/${t.id}` }, mine ? 'Turnuvam' : 'Görüntüle');
         return el('div', { class: 'trow' },
           el('div', { class: 'col tiny' },
             el('div', { class: 'row' }, el('span', { class: 'name' }, t.name), el('span', { class: `pill ${cls}` }, label), mine ? el('span', { class: 'pill' }, 'Kayıtlısın') : null),
             el('div', { class: 'meta' },
               el('span', {}, `${t.capacity} kişi`), el('span', { class: 'mono' }, t.timeControlLabel),
-              el('span', {}, t.entryFeeCents ? `${(t.entryFeeCents / 100).toFixed(2)} ${t.currency}` : 'Ücretsiz'),
+              el('span', { class: t.entryFeeCents ? 'fee' : '' }, t.entryFeeCents ? money(t.entryFeeCents, t.currency) : 'Ücretsiz'),
               el('span', {}, seats, ` ${t.joined}/${t.capacity}`),
             ),
           ),
@@ -694,9 +740,23 @@
 
   // ---- turnuva sayfası ---------------------------------------------------------
 
-  function tournamentView(id) {
+  function tournamentView(id, params = new URLSearchParams()) {
     let d = null;
     let verify = null;
+    // Ödeme sayfasından dönüş: ?odeme=<id>. Durum yalnız sunucudan (webhook ile kesinleşmiş) okunur.
+    const paymentId = params.get('odeme');
+    let payment = null;
+    let payPoll = null;
+    async function pollPayment() {
+      if (!paymentId || !session.user) return;
+      try {
+        payment = await api('GET', `/v1/payments/${paymentId}`);
+        render();
+        if (payment.status === 'CREATED' || (payment.status === 'SUCCEEDED' && d && !d.entries.some((e) => e.id === session.user.id && e.status !== 'RESERVED'))) {
+          payPoll = setTimeout(pollPayment, 1000);
+        }
+      } catch { /* sessiz */ }
+    }
     const root = el('div', { class: 'col' }, el('p', { class: 'muted' }, 'Yükleniyor…'));
     mount(root);
 
@@ -712,11 +772,34 @@
         el('span', { class: `pill ${cls}`, id: 'tournament-status' }, label),
       );
 
+      const paid = d.entryFeeCents > 0;
       const actions = [];
       if (d.status === 'OPEN') {
-        if (me) actions.push(el('button', { class: 'btn', type: 'button', id: 'leave', onclick: async () => { try { await api('POST', `/v1/tournaments/${id}/leave`, {}); } catch (e) { toast(e.message); } } }, 'Ayrıl'));
-        else if (session.user) actions.push(el('button', { class: 'btn accent', type: 'button', id: 'join', onclick: async () => { try { await api('POST', `/v1/tournaments/${id}/join`, {}); } catch (e) { toast(e.message); } } }, 'Katıl'));
+        if (me?.status === 'RESERVED') {
+          actions.push(el('button', { class: 'btn accent', type: 'button', id: 'pay', onclick: () => resumePayment(id) }, `Öde · ${money(d.entryFeeCents, d.currency)}`));
+          actions.push(el('button', { class: 'btn', type: 'button', id: 'leave', onclick: async () => { try { await api('POST', `/v1/tournaments/${id}/leave`, {}); } catch (e) { toast(e.message); } } }, 'Vazgeç'));
+        } else if (me) {
+          actions.push(el('button', { class: 'btn', type: 'button', id: 'leave', onclick: async () => {
+            if (paid && !confirm(`Turnuvadan ayrılırsan ${money(d.entryFeeCents, d.currency)} ücretin kartına iade edilir. Ayrılmak istiyor musun?`)) return;
+            try {
+              const r = await api('POST', `/v1/tournaments/${id}/leave`, {});
+              if (r.refund) toast('Ayrıldın. Ücretin iade ediliyor (birkaç gün içinde kartına yansır).', { href: '#/cuzdan', text: 'Cüzdan' });
+            } catch (e) { toast(e.message); }
+          } }, 'Ayrıl'));
+        } else if (session.user) actions.push(el('button', { class: 'btn accent', type: 'button', id: 'join', onclick: () => joinTournament(d) }, paid ? `Katıl · ${money(d.entryFeeCents, d.currency)}` : 'Katıl'));
         else actions.push(el('a', { class: 'btn primary', href: '#/giris' }, 'Katılmak için giriş yap'));
+      }
+      let payMsg = null;
+      if (me?.status === 'RESERVED' && d.status === 'OPEN') {
+        const mins = Math.max(0, Math.ceil((new Date(me.reservedUntil).getTime() - Date.now()) / 60000));
+        payMsg = el('p', { class: 'msg info', id: 'pay-msg' }, `Koltuğun ${mins} dakika boyunca senin için ayrıldı. Ödeme tamamlanınca kaydın kesinleşir.`);
+      }
+      if (payment) {
+        const confirmed = me && me.status !== 'RESERVED';
+        if (payment.status === 'SUCCEEDED') payMsg = el('p', { class: 'msg ok', id: 'pay-msg' }, confirmed ? `Ödeme alındı (kart •••• ${payment.cardLast4 || ''}). Kaydın kesinleşti.` : 'Ödeme alındı; koltuğun onaylanıyor…');
+        else if (payment.status === 'CREATED') payMsg = el('p', { class: 'msg info', id: 'pay-msg' }, 'Ödeme sağlayıcısından onay bekleniyor…');
+        else if (payment.status === 'FAILED') payMsg = el('p', { class: 'msg err', id: 'pay-msg' }, `Ödeme başarısız: ${PAY_FAIL[payment.failureReason] || payment.failureReason}.`);
+        else if (payment.status === 'REFUNDED' || payment.refundStatus) payMsg = el('p', { class: 'msg err', id: 'pay-msg' }, 'Ödemen bu turnuvaya bağlanamadı ve iade edildi.');
       }
       if (d.status === 'STARTING' && me) {
         const left = Math.max(0, Math.round((new Date(d.readyDeadline).getTime() - Date.now()) / 1000));
@@ -727,13 +810,14 @@
       const myGame = d.matches.flatMap((m) => m.games.map((g) => ({ ...g, m }))).find((g) => g.status === 'active' && (g.m.a?.id === session.user?.id || g.m.b?.id === session.user?.id));
       if (myGame) actions.push(el('a', { class: 'btn primary', href: `#/oyun/${myGame.id}` }, 'Oyununa git'));
 
-      const joinedCount = d.entries.length;
+      const joinedCount = d.entries.filter((e) => e.status !== 'RESERVED').length;
       const info = el('section', { class: 'card' },
         el('div', { class: 'spread' },
           el('div', {}, el('div', { class: 'big-count' }, `${joinedCount}/${d.capacity}`), el('div', { class: 'small muted' }, 'oyuncu')),
           el('div', { class: 'row' }, actions),
         ),
-        d.status === 'STARTING' ? el('p', { class: 'msg info' }, `Turnuva doldu. Herkes ${d.readySeconds} saniye içinde "Hazırım" demeli; demeyen hükmen elenir.`) : null,
+        payMsg,
+        d.status === 'STARTING' ? el('p', { class: 'msg info' }, `Turnuva doldu. Herkes ${d.readySeconds} saniye içinde "Hazırım" demeli; demeyen hükmen elenir${paid ? ' (ücret iade edilmez)' : ''}.`) : null,
         el('p', { class: 'small muted' }, `Her eşleşme renk değişimli 2 oyun; 1–1'de Armageddon (beyaz 5 dk, siyah 4 dk, beraberlikte siyah). Oyunlar arası mola ${d.breakSeconds} sn.`),
       );
 
@@ -746,10 +830,27 @@
       }
       const bracket = el('section', { class: 'card' }, el('h2', {}, 'Eleme tablosu'), el('div', { class: 'bracket', id: 'bracket' }, rounds));
 
+      let prizes = null;
+      if (paid) {
+        const awarded = d.awards && d.awards.length;
+        prizes = el('section', { class: 'card', id: 'prizes' }, el('h2', {}, awarded ? 'Ödüller' : 'Ödül tablosu'),
+          awarded
+            ? el('ul', { class: 'entrants' }, d.awards.map((a) => el('li', {},
+              el('span', {}, `${a.rank}. ${a.name}`),
+              el('span', {}, el('b', { class: 'mono' }, money(a.cents, d.currency)), ' ',
+                el('span', { class: `pill ${a.status === 'RELEASED' ? 'live' : a.status === 'VOID' ? 'warn' : ''}` }, a.status === 'RELEASED' ? 'ödendi' : a.status === 'VOID' ? 'iptal' : 'bekletmede')))))
+            : el('ul', { class: 'entrants' }, d.prizes.map((p) => el('li', {}, el('span', {}, rankLabel(p.rank, p.count)), el('b', { class: 'mono' }, p.count > 1 ? `${money(p.cents, d.currency)} (kişi başı)` : money(p.cents, d.currency))))),
+          el('p', { class: 'small muted' },
+            d.settlement
+              ? `Toplam giriş ${money(d.settlement.grossCents, d.currency)} · komisyon ${money(d.settlement.rakeCents, d.currency)} · ödül havuzu ${money(d.settlement.prizePoolCents, d.currency)}. Ödüller güvenlik incelemesi için bekletilir, sonra çekilebilir bakiyene geçer.`
+              : `Kontenjan dolarsa: ${d.capacity} × ${money(d.entryFeeCents, d.currency)}, komisyon %${(d.rakeBps / 100).toLocaleString('tr-TR')} (ödeme ücretleri dahil). Kuruş artığı şampiyona eklenir.`),
+        );
+      }
+
       const entrants = el('section', { class: 'card' }, el('h2', {}, 'Oyuncular'),
         d.entries.length ? el('ul', { class: 'entrants' }, [...d.entries].sort((a, b) => (a.finalRank ?? 99) - (b.finalRank ?? 99) || (a.seed ?? 99) - (b.seed ?? 99)).map((e) => el('li', {},
           el('span', {}, e.finalRank ? `${e.finalRank}. ` : '', e.name, session.user?.id === e.id ? ' (sen)' : ''),
-          el('span', { class: 'small muted' }, d.status === 'STARTING' ? (e.ready ? 'hazır' : 'bekleniyor') : e.status === 'ELIMINATED' ? 'elendi' : e.status === 'WINNER' ? 'şampiyon' : e.seed ? `sıra ${e.seed}` : ''),
+          el('span', { class: 'small muted' }, e.status === 'RESERVED' ? 'ödeme bekleniyor' : d.status === 'STARTING' ? (e.ready ? 'hazır' : 'bekleniyor') : e.status === 'ELIMINATED' ? 'elendi' : e.status === 'WINNER' ? 'şampiyon' : e.seed ? `sıra ${e.seed}` : ''),
         ))) : el('p', { class: 'muted small' }, 'Henüz kimse katılmadı.'),
       );
 
@@ -761,7 +862,7 @@
         verify ? el('p', { class: `msg ${verify.hashMatches && verify.orderMatches ? 'ok' : 'err'}`, id: 'verify-result' }, verify.hashMatches && verify.orderMatches ? 'Doğrulandı: seed özetle eşleşiyor ve yerleşim yeniden üretildi.' : 'Doğrulama başarısız.') : null,
       );
 
-      root.replaceChildren(head, el('div', { class: 'grid2' }, el('div', { class: 'col' }, info, bracket), el('div', { class: 'col' }, entrants, fair)));
+      root.replaceChildren(head, el('div', { class: 'grid2' }, el('div', { class: 'col' }, info, bracket), el('div', { class: 'col' }, prizes, entrants, fair)));
     }
 
     function matchCard(m) {
@@ -790,14 +891,73 @@
     });
     const sub = { type: 'tournament.subscribe', tournamentId: id };
     ws.keep(sub);
-    void api('GET', `/v1/tournaments/${id}`).then((x) => { d = x; for (const mt of d.matches) matchTournament.set(mt.id, id); render(); }).catch((e) => root.replaceChildren(el('p', { class: 'msg err' }, e.message)));
-    const ticker = setInterval(() => { if (d && d.status === 'STARTING') render(); }, 1000);
+    void api('GET', `/v1/tournaments/${id}`).then((x) => { d = x; for (const mt of d.matches) matchTournament.set(mt.id, id); render(); void pollPayment(); }).catch((e) => root.replaceChildren(el('p', { class: 'msg err' }, e.message)));
+    const ticker = setInterval(() => { if (d && (d.status === 'STARTING' || d.entries.some((e) => e.status === 'RESERVED'))) render(); }, 1000);
     return () => {
+      clearTimeout(payPoll);
       off();
       ws.drop(sub);
       ws.send({ type: 'tournament.unsubscribe', tournamentId: id });
       clearInterval(ticker);
     };
+  }
+
+  // ---- cüzdan --------------------------------------------------------------------
+
+  async function walletView() {
+    if (!session.user) {
+      mount(el('section', { class: 'card narrow' }, el('p', {}, 'Cüzdanını görmek için giriş yap.'), el('a', { class: 'btn primary', href: '#/giris' }, 'Giriş')));
+      return null;
+    }
+    const root = el('div', { class: 'col' }, el('p', { class: 'muted' }, 'Yükleniyor…'));
+    mount(root);
+    const PAY_STATUS = { CREATED: 'bekliyor', SUCCEEDED: 'ödendi', FAILED: 'başarısız', REFUNDED: 'iade edildi', DISPUTED: 'itiraz', CANCELED: 'iptal' };
+    const REASONS = { ENTRY_PAID: 'Giriş', TOURNAMENT_SETTLE: 'Ödül (bekletmede)', PRIZE_RELEASE: 'Ödül serbest', PRIZE_VOID: 'Ödül iptali', PAYOUT: 'Çekim', PAYOUT_REVERSAL: 'Çekim iadesi', ADJUSTMENT: 'Düzeltme' };
+    async function load() {
+      const w = await api('GET', '/v1/me/wallet');
+      const bals = w.balances.length ? w.balances : [{ currency: 'USD', availableCents: 0, pendingCents: 0 }];
+      const summary = el('section', { class: 'card', id: 'wallet-balance' }, el('h2', {}, 'Bakiye'),
+        el('div', { class: 'wallet-grid' }, bals.map((b) => [
+          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Çekilebilir'), el('b', { class: 'mono', dataset: { available: b.currency } }, money(b.availableCents, b.currency))),
+          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Bekletmede'), el('b', { class: 'mono', dataset: { pending: b.currency } }, money(b.pendingCents, b.currency))),
+        ])),
+        el('p', { class: 'small muted' }, 'Ödüller, hile incelemesi için tutara göre 12–48 saat bekletilir; sonra çekilebilir bakiyeye geçer.'),
+        el('button', { class: 'btn', type: 'button', disabled: true, title: 'Kimlik doğrulama (KYC) gerekli' }, 'Para çek'),
+        el('p', { class: 'small muted' }, 'Para çekme, kimlik doğrulaması (KYC) tamamlandığında açılır.'),
+      );
+      const awards = el('section', { class: 'card' }, el('h2', {}, 'Ödüller'),
+        w.awards.length ? el('ul', { class: 'entrants' }, w.awards.map((a) => el('li', {},
+          el('span', {}, el('a', { href: `#/turnuva/${a.tournamentId}` }, a.tournamentName), ` · ${a.rank}.`),
+          el('span', {}, el('b', { class: 'mono' }, money(a.cents, a.currency)), ' ',
+            el('span', { class: `pill ${a.status === 'RELEASED' ? 'live' : a.status === 'VOID' ? 'warn' : ''}` },
+              a.status === 'RELEASED' ? 'çekilebilir' : a.status === 'VOID' ? 'iptal edildi' : `${fmtTime(a.holdUntil)}'e kadar bekletmede`)),
+        ))) : el('p', { class: 'muted small' }, 'Henüz ödül yok.'),
+      );
+      const pays = el('section', { class: 'card' }, el('h2', {}, 'Ödemeler'),
+        w.payments.length ? el('ul', { class: 'entrants', id: 'payment-list' }, w.payments.map((p) => el('li', {},
+          el('span', {}, p.tournamentName ? el('a', { href: `#/turnuva/${p.tournamentId}` }, p.tournamentName) : 'Ödeme', el('span', { class: 'small muted' }, ` · ${fmtTime(p.createdAt)}${p.cardLast4 ? ` · •••• ${p.cardLast4}` : ''}`)),
+          el('span', {}, el('b', { class: 'mono' }, money(p.amountCents, p.currency)), ' ',
+            el('span', { class: `pill ${p.status === 'SUCCEEDED' ? 'live' : p.status === 'REFUNDED' ? 'done' : p.status === 'FAILED' || p.status === 'DISPUTED' ? 'warn' : ''}` },
+              p.refundStatus === 'PENDING' ? 'iade ediliyor' : PAY_STATUS[p.status] || p.status)),
+        ))) : el('p', { class: 'muted small' }, 'Henüz ödeme yok.'),
+      );
+      const hist = el('section', { class: 'card' }, el('h2', {}, 'Hareketler'),
+        w.history.length ? el('ul', { class: 'entrants' }, w.history.map((h) => el('li', {},
+          el('span', {}, h.reason === 'PRIZE_RELEASE' && h.bucket === 'pending' ? 'Bekletmeden çıktı' : REASONS[h.reason] || h.reason, el('span', { class: 'small muted' }, ` · ${fmtTime(h.at)} · ${h.bucket === 'pending' ? 'bekletme' : 'çekilebilir'}`)),
+          el('b', { class: `mono ${h.cents < 0 ? 'neg' : 'pos'}` }, `${h.cents > 0 ? '+' : ''}${money(h.cents, h.currency)}`),
+        ))) : el('p', { class: 'muted small' }, 'Hareket yok.'),
+      );
+      root.replaceChildren(
+        el('header', {}, el('p', { class: 'eyebrow' }, 'Hesap'), el('h1', {}, 'Cüzdan')),
+        el('div', { class: 'grid2' }, el('div', { class: 'col' }, summary, pays), el('div', { class: 'col' }, awards, hist)),
+      );
+    }
+    await load();
+    let t = null;
+    const off = ws.on((m) => {
+      if (/^(payment|prize)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
+    });
+    return () => { off(); clearTimeout(t); };
   }
 
   // ---- başlangıç ------------------------------------------------------------------

@@ -42,6 +42,12 @@ export interface Config {
   /** Sandbox webhook teslim gecikmesi ve yineleme olasılığı (dayanıklılık testi). */
   sandboxDeliveryDelayMs: number;
   sandboxDuplicateRate: number;
+  /** K6: ücretli turnuvaya girmek için insan rakiplere karşı en az rated oyun. */
+  paidMinRatedGames: number;
+  /** Ücretli kayıtta koltuk rezervasyon süresi (doküman 3.7: 10 dk). */
+  seatReservationSec: number;
+  /** Ödül bekletme süresini sabitler (yalnız geliştirme/test); boşsa doküman 5.8 tablosu. */
+  prizeHoldSec: number | null;
 }
 
 function num(name: string, fallback: number): number {
@@ -92,10 +98,14 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     publicBaseUrl: process.env.PUBLIC_BASE_URL || null,
     sandboxDeliveryDelayMs: num('SANDBOX_DELIVERY_DELAY_MS', 300),
     sandboxDuplicateRate: num('SANDBOX_DUPLICATE_RATE', 0.2),
+    paidMinRatedGames: num('PAID_MIN_RATED_GAMES', 10),
+    seatReservationSec: num('SEAT_RESERVATION_SEC', 600),
+    prizeHoldSec: process.env.PRIZE_HOLD_SEC ? num('PRIZE_HOLD_SEC', 0) : null,
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');
   if (prod && cfg.devMailbox) throw new Error('DEV_MAILBOX üretimde açılamaz');
+  if (prod && cfg.prizeHoldSec !== null) throw new Error('PRIZE_HOLD_SEC üretimde kullanılamaz (doküman 5.8 süreleri geçerli)');
   if (!['sandbox', 'stripe'].includes(cfg.paymentProvider)) throw new Error('PAYMENT_PROVIDER sandbox ya da stripe olmalı');
   if (prod && cfg.paymentProvider === 'sandbox') throw new Error('Sandbox ödeme sağlayıcısı üretimde kullanılamaz');
   if (cfg.paymentProvider === 'stripe') {

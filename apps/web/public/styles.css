@@ -101,6 +101,14 @@ label.check input { width: auto; margin-top: 3px; }
 .ratings .r b { font: 600 18px var(--font-mono); }
 .ratings .r span { font-size: 12px; color: var(--muted); text-transform: capitalize; }
 
+/* Cüzdan ve ödül */
+.wallet-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.wallet-grid .stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 2px; }
+.wallet-grid .stat b { font-size: 22px; }
+.trow .meta .fee { color: var(--accent); font-weight: 600; }
+.mono.neg { color: var(--crit); }
+.mono.pos { color: var(--good); }
+
 /* Oyun */
 .game { display: grid; grid-template-columns: minmax(0, 560px) minmax(0, 1fr); gap: 20px; align-items: start; }
 @media (max-width: 900px) { .game { grid-template-columns: minmax(0, 1fr); } }

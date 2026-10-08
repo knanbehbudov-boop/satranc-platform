@@ -110,6 +110,11 @@ export class LedgerService {
   /** Ödeme alındı ve koltuğa bağlandı (doküman 5.6 örneği; K9: ücret ayrı gider). */
   async recordEntryPayment(q: Queryable, p: { paymentId: string; tournamentId: string; userId: string; cents: number; feeCents: number; currency: string }): Promise<void> {
     await this.recordReceipt(q, p);
+    await this.assignToPool(q, p);
+  }
+
+  /** Geçici hesaptaki tahsilatı turnuva emanetine bağlar (koltuk onaylandı). */
+  async assignToPool(q: Queryable, p: { paymentId: string; tournamentId: string; userId: string; cents: number; currency: string }): Promise<void> {
     await this.post(q, {
       key: `payment:${p.paymentId}:to-pool`,
       reason: 'ENTRY_PAID',

@@ -31,21 +31,17 @@ async function flush(timeoutMs = 5000): Promise<void> {
   throw new Error('Webhook teslimi zaman aşımı');
 }
 
-/** Ücretsiz turnuvaya katılarak ödeme kaydının bağlanacağı bir koltuk (entry) üretir. */
+/**
+ * Turnuvadan bağımsız ödeme (koltuğa bağlı akış Bölüm 8 testlerinde: paid-tournament.test.ts).
+ * tournamentId/entryId boş olduğu için turnuva modülü 'payment.succeeded' olayını yok sayar.
+ */
 async function playerWithEntry() {
   const p = await newPlayer(env.base);
-  await env.app.tournaments.ensureOpen();
-  const t = (await q<{ id: string }>(
-    `SELECT t.id FROM tournaments t JOIN tournament_templates x ON x.id = t.template_id WHERE x.code = 'ucretsiz-8-blitz' AND t.status = 'OPEN'`,
-  ))[0]!;
-  const j = await p.client.post(`/v1/tournaments/${t.id}/join`);
-  assert.equal(j.status, 200, JSON.stringify(j.body));
-  const e = (await q<{ id: string }>('SELECT id FROM entries WHERE tournament_id = $1 AND user_id = $2', [t.id, p.id]))[0]!;
-  return { ...p, tournamentId: t.id, entryId: e.id };
+  return { ...p, tournamentId: null as string | null, entryId: null as string | null };
 }
 
 let keyNo = 0;
-async function newPayment(p: { id: string; tournamentId: string; entryId: string }, cents = 1000) {
+async function newPayment(p: { id: string; tournamentId: string | null; entryId: string | null }, cents = 1000) {
   const r = await env.app.payments.createPayment({
     userId: p.id,
     tournamentId: p.tournamentId,
@@ -149,7 +145,7 @@ describe('ödeme akışı (sandbox)', () => {
     assert.equal(await bal('USER_PAYMENT_IN:USD') - before.inn, 1000);
     const ev = await q(`SELECT payload FROM outbox WHERE topic = 'payment.succeeded' AND payload->>'paymentId' = $1`, [x.paymentId]);
     assert.equal(ev.length, 1);
-    assert.equal(ev[0].payload.entryId, p.entryId);
+    assert.equal(ev[0].payload.userId, p.id);
   });
 
   it('yinelenen webhook (her olay iki kez + elle tekrar) defteri ikinci kez etkilemez', async () => {

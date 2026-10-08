@@ -21,6 +21,7 @@ import { BotService } from './modules/bot/service.ts';
 import { RatingService } from './modules/rating/service.ts';
 import { TournamentService } from './modules/tournament/service.ts';
 import { LedgerService } from './modules/ledger/service.ts';
+import { FlagService } from './modules/admin/flags.ts';
 import type { PaymentProvider } from './modules/payments/provider.ts';
 import { SandboxPsp } from './modules/payments/sandbox.ts';
 import { PaymentService } from './modules/payments/service.ts';
@@ -45,6 +46,7 @@ export interface App {
   tournaments: TournamentService;
   ledger: LedgerService;
   payments: PaymentService;
+  flags: FlagService;
   /** Yalnız PAYMENT_PROVIDER=sandbox iken. */
   sandbox: SandboxPsp | null;
   /** Dinlenen gerçek port (0 verilirse işletim sisteminin seçtiği). */
@@ -63,6 +65,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
 
   const events = new OutboxDispatcher(pool, logger.child({ part: 'outbox' }));
   const ledger = new LedgerService(pool);
+  const flags = new FlagService(pool);
   const identity = new IdentityService(pool, cfg);
   const limiter = new RateLimiter();
   const router = new Router({
@@ -126,9 +129,42 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return { user: prof, ratings: await ratings.ratingsOf(prof.id) };
   });
 
+  // ---- M7 ödeme ----
+  let sandbox: SandboxPsp | null = null;
+  let provider: PaymentProvider;
+  if (cfg.paymentProvider === 'sandbox') {
+    sandbox = new SandboxPsp({
+      pool,
+      logger: logger.child({ part: 'sandbox-psp' }),
+      webhookSecret: cfg.pspWebhookSecret,
+      // Sandbox aynı süreçte çalışır; webhook'u gerçek HTTP isteğiyle kendi adresimize gönderir.
+      webhookUrl: () => `http://127.0.0.1:${app.port}/v1/webhooks/psp`,
+      options: { deliveryDelayMs: cfg.sandboxDeliveryDelayMs, duplicateRate: cfg.sandboxDuplicateRate },
+    });
+    sandbox.routes(router);
+    provider = sandbox;
+  } else {
+    provider = new StripePsp({
+      secretKey: cfg.stripeSecretKey as string,
+      webhookSecret: cfg.pspWebhookSecret,
+      publicBaseUrl: cfg.publicBaseUrl as string,
+      apiBase: cfg.stripeApiBase,
+    });
+  }
+  const payments = new PaymentService({ pool, logger: logger.child({ part: 'payments' }), provider, ledger, identity });
+  router.post('/v1/webhooks/psp', async (ctx) => {
+    const r = await payments.handleWebhook(ctx.rawBody, ctx.req.headers);
+    return { received: true, duplicate: r.duplicate };
+  });
+  router.get('/v1/payments/:id', async (ctx) => payments.getForUser(ctx.requireUser().id, ctx.params.id as string));
+  router.get('/v1/me/payments', async (ctx) => ({ payments: await payments.listForUser(ctx.requireUser().id) }));
+
   // ---- M5 turnuva ----
-  const tournaments = new TournamentService({ pool, cfg, logger: logger.child({ part: 'tournament' }), hub, games, identity, ratings });
+  const tournaments = new TournamentService({ pool, cfg, logger: logger.child({ part: 'tournament' }), hub, games, identity, ratings, payments, ledger, flags });
   events.subscribe('tournament', ['game.ended'], tournaments.onGameEnded);
+  events.subscribe('tournament-payments', ['payment.succeeded', 'payment.failed'], (ev, tx, hooks) =>
+    ev.topic === 'payment.succeeded' ? tournaments.onPaymentSucceeded(ev, tx, hooks) : tournaments.onPaymentFailed(ev, tx, hooks));
+  events.subscribe('settlement', ['tournament.finished'], tournaments.onTournamentFinished);
   const tid = (ctx: { params: Record<string, string> }): string => {
     if (!isUuid(ctx.params.id)) throw notFound('TOURNAMENT_NOT_FOUND', 'Turnuva bulunamadı');
     return ctx.params.id as string;
@@ -145,8 +181,32 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return tournaments.join(u.id, tid(ctx), { ip: ctx.ip, deviceKey: ctx.deviceKey });
   });
   router.post('/v1/tournaments/:id/leave', async (ctx) => {
-    await tournaments.leave(ctx.requireUser().id, tid(ctx));
-    return { ok: true };
+    const r = await tournaments.leave(ctx.requireUser().id, tid(ctx));
+    return { ok: true, refund: r.refund };
+  });
+  router.post('/v1/tournaments/:id/pay', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`join:${u.id}`, RULES.join);
+    return tournaments.resumePayment(u.id, tid(ctx));
+  });
+  router.get('/v1/me/wallet', async (ctx) => {
+    const u = ctx.requireUser();
+    const awards = await pool.query<{ tournament_id: string; name: string; rank: number; cents: number; currency: string; status: string; hold_until: Date; released_at: Date | null }>(
+      `SELECT a.tournament_id, t.name, a.rank, a.cents, a.currency, a.status, a.hold_until, a.released_at
+       FROM prize_awards a JOIN tournaments t ON t.id = a.tournament_id WHERE a.user_id = $1 ORDER BY a.created_at DESC LIMIT 50`,
+      [u.id],
+    );
+    return {
+      balances: await ledger.userBalances(u.id),
+      awards: awards.rows.map((a) => ({
+        tournamentId: a.tournament_id, tournamentName: a.name, rank: a.rank, cents: a.cents, currency: a.currency,
+        status: a.status, holdUntil: a.hold_until, releasedAt: a.released_at,
+      })),
+      payments: await payments.listForUser(u.id, 20),
+      history: await ledger.userHistory(u.id, 50),
+      // Para çekme (payout) KYC ile birlikte açılır (doküman 5.4–5.5); bu sürümde yalnız bakiye görünür.
+      withdrawals: { available: false, reason: 'KYC_REQUIRED' },
+    };
   });
   router.post('/v1/tournaments/:id/ready', async (ctx) => {
     await tournaments.ready(ctx.requireUser().id, tid(ctx));
@@ -187,36 +247,6 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return { template: r.rows[0] };
   });
 
-  // ---- M7 ödeme ----
-  let sandbox: SandboxPsp | null = null;
-  let provider: PaymentProvider;
-  if (cfg.paymentProvider === 'sandbox') {
-    sandbox = new SandboxPsp({
-      pool,
-      logger: logger.child({ part: 'sandbox-psp' }),
-      webhookSecret: cfg.pspWebhookSecret,
-      // Sandbox aynı süreçte çalışır; webhook'u gerçek HTTP isteğiyle kendi adresimize gönderir.
-      webhookUrl: () => `http://127.0.0.1:${app.port}/v1/webhooks/psp`,
-      options: { deliveryDelayMs: cfg.sandboxDeliveryDelayMs, duplicateRate: cfg.sandboxDuplicateRate },
-    });
-    sandbox.routes(router);
-    provider = sandbox;
-  } else {
-    provider = new StripePsp({
-      secretKey: cfg.stripeSecretKey as string,
-      webhookSecret: cfg.pspWebhookSecret,
-      publicBaseUrl: cfg.publicBaseUrl as string,
-      apiBase: cfg.stripeApiBase,
-    });
-  }
-  const payments = new PaymentService({ pool, logger: logger.child({ part: 'payments' }), provider, ledger, identity });
-  router.post('/v1/webhooks/psp', async (ctx) => {
-    const r = await payments.handleWebhook(ctx.rawBody, ctx.req.headers);
-    return { received: true, duplicate: r.duplicate };
-  });
-  router.get('/v1/payments/:id', async (ctx) => payments.getForUser(ctx.requireUser().id, ctx.params.id as string));
-  router.get('/v1/me/payments', async (ctx) => ({ payments: await payments.listForUser(ctx.requireUser().id) }));
-
   const http = createServer((req, res) => void router.handle(req, res));
   http.on('upgrade', (req, socket) => {
     if (!req.url?.startsWith('/v1/ws')) {
@@ -243,6 +273,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     tournaments,
     ledger,
     payments,
+    flags,
     sandbox,
     port: cfg.port,
     async start() {
