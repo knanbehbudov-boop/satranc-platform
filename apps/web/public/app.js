@@ -92,6 +92,9 @@
   // ---- oturum ---------------------------------------------------------------
 
   const session = { token: null, user: null, refreshTimer: null };
+  /** Sunucunun genel ayarları (demo araçları açık mı vb.). */
+  let appCfg = { demoTools: false };
+  const cfgReady = fetch('/v1/config').then((r) => r.json()).then((c) => { appCfg = c; }).catch(() => undefined);
   const deviceId = (() => {
     try {
       let id = localStorage.getItem('deviceId');
@@ -413,6 +416,13 @@
       root,
     );
 
+    if (appCfg.demoTools) {
+      left.append(el('section', { class: 'card demo', id: 'demo-banner' },
+        el('h2', {}, 'Test sürümü'),
+        el('p', { class: 'small' }, 'Ödemeler sahtedir, gerçek para çekilmez. Test kartı: ', el('b', { class: 'mono' }, '4242 4242 4242 4242'), ' · tarih 12/30 · CVC 123.'),
+        el('p', { class: 'small muted' }, 'İlk iki hesap yönetici olur. Turnuva sayfasında "Test botlarıyla doldur" ile turnuvayı tek başına başlatabilirsin.'),
+      ));
+    }
     const listCard = el('section', { class: 'card', id: 'tournament-list' }, el('h2', {}, 'Açık ve süren turnuvalar'), el('p', { class: 'muted small' }, 'Yükleniyor…'));
     left.append(listCard);
 
@@ -816,6 +826,17 @@
           ? el('span', { class: 'pill live' }, 'Hazırsın — diğerleri bekleniyor')
           : el('button', { class: 'btn accent', type: 'button', id: 'ready', onclick: () => ws.send({ type: 'tournament.ready', tournamentId: id }) }, `Hazırım (${left} sn)`));
       }
+      if (d.status === 'OPEN' && appCfg.demoTools && isStaff()) {
+        const joined = !!me;
+        actions.push(el('button', { class: 'btn', type: 'button', id: 'fill-bots', onclick: async (ev) => {
+          ev.target.disabled = true;
+          ev.target.textContent = 'Botlar katılıyor…';
+          try {
+            const r = await api('POST', `/v1/admin/tournaments/${id}/fill-bots`, { leaveSeats: joined ? 0 : 1 });
+            toast(joined ? `${r.added} test botu katıldı; turnuva doluyor.` : `${r.added} test botu katıldı. Son koltuk senin: "Katıl"a bas.`);
+          } catch (e) { toast(e.message); ev.target.disabled = false; }
+        } }, joined ? 'Kalan koltukları test botlarıyla doldur' : 'Bana bir koltuk bırakıp botlarla doldur'));
+      }
       const myGame = d.matches.flatMap((m) => m.games.map((g) => ({ ...g, m }))).find((g) => g.status === 'active' && (g.m.a?.id === session.user?.id || g.m.b?.id === session.user?.id));
       if (myGame) actions.push(el('a', { class: 'btn primary', href: `#/oyun/${myGame.id}` }, 'Oyununa git'));
 
@@ -1172,5 +1193,5 @@
   window.addEventListener('hashchange', () => void route());
   renderNav();
   ws.connect();
-  (hint.get() ? refresh() : Promise.resolve(false)).finally(() => void route());
+  Promise.all([cfgReady, hint.get() ? refresh() : Promise.resolve(false)]).finally(() => void route());
 })();

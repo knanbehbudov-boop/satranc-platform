@@ -1,0 +1,41 @@
+# Render "Blueprint": tek tıkla test sunucusu + PostgreSQL.
+# Kullanım: kod bir GitHub deposundayken
+#   https://render.com/deploy?repo=https://github.com/<kullanıcı>/<depo>
+# adresini açın → "Apply". Kurulum 5–10 dk sürer; sonunda https://satranc-xxxx.onrender.com adresi verilir.
+# Bu bir TEST kurulumudur: ödemeler sahte (sandbox), demo araçları açık, gerçek para alınmaz.
+services:
+  - type: web
+    name: satranc
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: development        # sandbox ödeme ve demo araçları yalnız üretim dışında açılır
+      - key: DATABASE_URL
+        fromDatabase:
+          name: satranc-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PSP_WEBHOOK_SECRET
+        generateValue: true
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DEMO_TOOLS
+        value: "1"                # ilk iki hesap yönetici; turnuvayı test botlarıyla doldurma
+      - key: PAID_MIN_RATED_GAMES
+        value: "0"                # K6 şartı testte kapalı
+      - key: PRIZE_HOLD_SEC
+        value: "60"               # ödül bekletmesi testte 1 dk
+      - key: RISK_MEDIUM_EXTRA_HOLD_SEC
+        value: "120"
+      - key: SANDBOX_DELIVERY_DELAY_MS
+        value: "300"
+      - key: LOG_LEVEL
+        value: info
+databases:
+  - name: satranc-db
+    plan: free
+    databaseName: satranc
+    user: satranc

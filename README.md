@@ -32,6 +32,19 @@ Toplam **215 otomatik test**. Ek olarak:
   her turnuvada komisyon + ödüller = koltuk × ücret (1 cent fark yok), emanetler ve geçici hesap
   sıfır, her olay tam bir kez işlendi, mutabakat farkı 0.
 
+## İnternette test sunucusu (bilgisayar gerekmez, iPad'den)
+
+`render.yaml` dosyası Render.com için hazır bir kurulumdur: test sunucusu + PostgreSQL, ücretsiz plan.
+
+1. Kod bir GitHub deposunda olmalı.
+2. `https://render.com/deploy?repo=https://github.com/<kullanıcı>/<depo>` adresini açın, GitHub ile giriş yapın, **Apply**.
+3. 5–10 dk sonra `https://satranc-xxxx.onrender.com` adresi hazır olur.
+
+Bu kurulumda `DEMO_TOOLS=1`: **ilk iki kayıt olan hesap yönetici olur**, ödemeler sahtedir (test kartı
+`4242 4242 4242 4242`), ve yönetici turnuva sayfasında **"Bana bir koltuk bırakıp botlarla doldur"** ile
+turnuvayı tek başına başlatabilir. Ücretsiz planda sunucu 15 dk hareketsizlikte uyur; ilk açılış ~1 dk sürer.
+Ücretsiz PostgreSQL 30 gün sonra silinir. `DEMO_TOOLS` üretimde açılamaz.
+
 ## Çalıştırma
 
 ### A) Docker ile (en kolay)

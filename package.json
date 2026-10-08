@@ -29,7 +29,9 @@
     "presimulate": "node scripts/link.mjs",
     "simulate:money": "node scripts/simulate-money.mjs",
     "presimulate:money": "node scripts/link.mjs",
-    "make-admin": "node scripts/make-admin.mjs"
+    "make-admin": "node scripts/make-admin.mjs",
+    "e2e:demo": "node scripts/e2e-demo.mjs",
+    "pree2e:demo": "node scripts/link.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",

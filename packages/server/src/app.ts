@@ -24,6 +24,7 @@ import { LedgerService } from './modules/ledger/service.ts';
 import { FlagService } from './modules/admin/flags.ts';
 import { adminRoutes } from './modules/admin/routes.ts';
 import { AdminService } from './modules/admin/service.ts';
+import { DemoService } from './modules/demo/service.ts';
 import { AnalysisService } from './modules/fairplay/analysis.ts';
 import { FairPlayService } from './modules/fairplay/service.ts';
 import type { PaymentProvider } from './modules/payments/provider.ts';
@@ -231,6 +232,27 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   const admin = new AdminService({ pool, logger: logger.child({ part: 'admin' }), identity, tournaments, fairplay, analysis, payments, ledger, flags });
   adminRoutes(router, { admin, fairplay, analysis, payments, tournaments, pool });
 
+  // ---- arayüzün bilmesi gereken genel ayarlar ----
+  router.get('/v1/config', () => ({
+    demoTools: cfg.demoTools,
+    paymentProvider: cfg.paymentProvider,
+    paidMinRatedGames: cfg.paidMinRatedGames,
+  }));
+
+  // ---- demo araçları (yalnız DEMO_TOOLS=1, üretim dışı) ----
+  const demo = cfg.demoTools
+    ? new DemoService({ pool, cfg, logger: logger.child({ part: 'demo' }), identity, tournaments, games, baseUrl: () => `http://127.0.0.1:${app.port}` })
+    : null;
+  if (demo) {
+    router.post('/v1/admin/tournaments/:id/fill-bots', async (ctx) => {
+      const s = await admin.requireStaff(ctx.requireUser().id, []);
+      if (!isUuid(ctx.params.id)) throw notFound('TOURNAMENT_NOT_FOUND', 'Turnuva bulunamadı');
+      const b = (ctx.body ?? {}) as { leaveSeats?: number };
+      const leave = Number.isInteger(b.leaveSeats) ? Math.max(0, Math.min(31, b.leaveSeats as number)) : 0;
+      return demo.fill(ctx.params.id as string, s.id, leave);
+    });
+  }
+
   const http = createServer((req, res) => void router.handle(req, res));
   http.on('upgrade', (req, socket) => {
     if (!req.url?.startsWith('/v1/ws')) {
@@ -273,6 +295,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       analysis.start();
       await games.start();
       await tournaments.start();
+      await demo?.start().catch((e) => logger.error('Demo botları başlatılamadı', { error: e }));
       logger.info('Sunucu hazır', { url: `http://${cfg.host}:${app.port}` });
     },
     async stop() {
@@ -281,6 +304,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       sandbox?.stop();
       analysis.stop();
       tournaments.stop();
+      demo?.stop();
       games.stop();
       bots.stop();
       clearInterval(sweeper);

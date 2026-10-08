@@ -118,7 +118,14 @@ export class IdentityService {
            VALUES ($1, $2, $3, $4, $5, $6, now()) RETURNING *`,
           [input.email, input.displayName, hash, input.countryCode, birth.getUTCFullYear(), this.cfg.tosVersion],
         );
-        const user = r.rows[0] as UserRow;
+        let user = r.rows[0] as UserRow;
+        if (this.cfg.demoTools) {
+          // Demo: ilk iki gerçek hesap yönetici olur (dört göz onayı iki kişi ister).
+          const admins = await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM users WHERE 'admin' = ANY(roles)`);
+          if ((admins.rows[0] as { n: number }).n < 2) {
+            user = (await tx.query<UserRow>(`UPDATE users SET roles = '{player,admin}' WHERE id = $1 RETURNING *`, [user.id])).rows[0] as UserRow;
+          }
+        }
         await this.issueEmailToken(tx, user);
         await tx.query(
           `INSERT INTO audit_log (actor_id, action, target_type, target_id, data, ip) VALUES ($1::uuid, 'user.register', 'user', $1::text, $2, $3)`,

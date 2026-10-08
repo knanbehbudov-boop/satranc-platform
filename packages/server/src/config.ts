@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 /**
  * Yapılandırma: yalnızca ortam değişkenlerinden okunur, koda gizli anahtar girmez.
  * Geliştirme varsayılanları yalnız NODE_ENV !== 'production' iken geçerlidir;
@@ -58,6 +59,8 @@ export interface Config {
   analyzeFreeGames: boolean;
   /** Orta risk: ödül bekletmesine eklenen süre (doküman 14.3). */
   riskMediumExtraHoldSec: number;
+  /** Demo araçları (yalnız üretim dışı): ilk iki hesap yönetici, turnuvayı test botlarıyla doldurma. */
+  demoTools: boolean;
 }
 
 function num(name: string, fallback: number): number {
@@ -117,10 +120,19 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     analysisSkipPlies: num('ANALYSIS_SKIP_PLIES', 20),
     analyzeFreeGames: bool('ANALYZE_FREE_GAMES', false),
     riskMediumExtraHoldSec: num('RISK_MEDIUM_EXTRA_HOLD_SEC', 24 * 3600),
+    demoTools: bool('DEMO_TOOLS', false),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');
   if (prod && cfg.devMailbox) throw new Error('DEV_MAILBOX üretimde açılamaz');
+  if (prod && cfg.demoTools) throw new Error('DEMO_TOOLS üretimde açılamaz');
+  // Verilen Stockfish yolu yoksa: üretimde hata, geliştirmede yerleşik motora düşülür.
+  if (cfg.stockfishPath && !existsSync(cfg.stockfishPath)) {
+    if (prod) throw new Error(`STOCKFISH_PATH bulunamadı: ${cfg.stockfishPath}`);
+    console.warn(`[uyarı] STOCKFISH_PATH bulunamadı (${cfg.stockfishPath}); yerleşik motor kullanılacak`);
+    cfg.stockfishPath = null;
+    if (!process.env.ANALYSIS_DEPTH) cfg.analysisDepth = 3;
+  }
   // K33: hile analizi sığ yerleşik motorla anlamlı değildir; ücretli turnuva varken üretimde Stockfish şart.
   if (prod && !cfg.stockfishPath) throw new Error('Üretimde STOCKFISH_PATH zorunludur (adil oyun analizi)');
   if (prod && cfg.prizeHoldSec !== null) throw new Error('PRIZE_HOLD_SEC üretimde kullanılamaz (doküman 5.8 süreleri geçerli)');

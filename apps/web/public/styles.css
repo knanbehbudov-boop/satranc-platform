@@ -109,6 +109,9 @@ label.check input { width: auto; margin-top: 3px; }
 .mono.neg { color: var(--crit); }
 .mono.pos { color: var(--good); }
 
+/* Demo */
+.card.demo { border-color: var(--accent); background: var(--accent-soft); }
+
 /* Yönetim */
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
 .tabs a { text-decoration: none; padding: 6px 12px; border-radius: 8px; font-size: 14px; color: var(--muted); }

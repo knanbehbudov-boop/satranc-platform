@@ -3,7 +3,7 @@
 FROM node:22-alpine
 
 # Stockfish: bot rakip ve adil oyun analizi için (üretimde zorunlu, K33). Alpine community deposundan.
-RUN apk add --no-cache stockfish
+RUN apk add --no-cache stockfish || echo 'uyarı: stockfish paketi kurulamadı; geliştirmede yerleşik motor kullanılır'
 
 WORKDIR /app
 COPY package.json tsconfig.json ./
