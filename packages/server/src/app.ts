@@ -32,6 +32,8 @@ import { SandboxPsp } from './modules/payments/sandbox.ts';
 import { PaymentService } from './modules/payments/service.ts';
 import { StripePsp } from './modules/payments/stripe.ts';
 import { WalletService, type PayoutMethod } from './modules/wallet/service.ts';
+import { ReviewService } from './modules/review/service.ts';
+import { AssistantService, MessagesApiProvider } from './modules/assistant/service.ts';
 import { RULES } from './infra/http/ratelimit.ts';
 import { notFound } from './infra/errors.ts';
 
@@ -52,6 +54,8 @@ export interface App {
   ledger: LedgerService;
   payments: PaymentService;
   wallet: WalletService;
+  reviews: ReviewService;
+  assistant: AssistantService;
   flags: FlagService;
   analysis: AnalysisService;
   fairplay: FairPlayService;
@@ -238,6 +242,47 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   events.subscribe('fairplay', ['analysis.completed', 'analysis.failed'], (ev, tx, hooks) =>
     ev.topic === 'analysis.completed' ? fairplay.onAnalysisCompleted(ev, tx, hooks) : fairplay.onAnalysisFailed(ev, tx));
   tournaments.riskGate = fairplay.gate;
+
+  // ---- K45 oyun sonu analizi, şikayet, satranç asistanı ----
+  const reviews = new ReviewService({ pool, analysis });
+  events.subscribe('review-notify', ['analysis.completed'], async (ev, tx, hooks) => {
+    const e = ev.payload as { gameId: string };
+    const g = await tx.query<{ white_id: string | null; black_id: string | null }>('SELECT white_id, black_id FROM games WHERE id = $1', [e.gameId]);
+    const row = g.rows[0];
+    if (!row) return;
+    hooks.afterCommit(() => {
+      for (const u of [row.white_id, row.black_id]) if (u) hub.sendToUser(u, { type: 'review.ready', gameId: e.gameId });
+    });
+  });
+  const enqueueForReport = (q: import('./infra/db/pg.ts').Queryable, gameId: string) => analysis.enqueue(q, gameId, 'report', 2);
+  const assistant = new AssistantService({
+    pool, cfg, logger: logger.child({ part: 'assistant' }), games, fairplay, reviews, enqueueAnalysis: enqueueForReport,
+    provider: cfg.assistantApiKey ? new MessagesApiProvider({ apiKey: cfg.assistantApiKey, model: cfg.assistantModel, apiBase: cfg.assistantApiBase }) : null,
+  });
+  router.get('/v1/games/:id/review', async (ctx) => reviews.review(ctx.requireUser().id, ctx.params.id as string));
+  router.post('/v1/games/:id/review', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`review:${u.id}`, RULES.join);
+    return reviews.request(u.id, ctx.params.id as string);
+  });
+  router.post('/v1/games/:id/report', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`report:${u.id}`, RULES.join);
+    if (!isUuid(ctx.params.id)) throw notFound('GAME_NOT_FOUND', 'Oyun bulunamadı');
+    const b = parse({ category: { type: 'string', pattern: /^(cheating|abuse|other)$/ }, text: { type: 'string', min: 3, max: 1000 } }, ctx.body);
+    ctx.status = 201;
+    return fairplay.reportPlayer(u.id, ctx.params.id as string, { category: b.category as 'cheating' | 'abuse' | 'other', text: b.text, via: 'form' }, enqueueForReport);
+  });
+  router.get('/v1/assistant', async (ctx) => assistant.status(ctx.requireUser().id));
+  router.post('/v1/assistant/messages', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`assistant:${u.id}`, RULES.join);
+    const b = parse(
+      { text: { type: 'string', min: 1, max: 2000 }, gameId: { type: 'string', optional: true }, locale: { type: 'string', pattern: /^(tr|en|ru)$/, optional: true } },
+      ctx.body,
+    );
+    return assistant.send(u.id, { text: b.text, gameId: b.gameId ?? null, ...(b.locale ? { locale: b.locale } : {}) });
+  });
   const tid = (ctx: { params: Record<string, string> }): string => {
     if (!isUuid(ctx.params.id)) throw notFound('TOURNAMENT_NOT_FOUND', 'Turnuva bulunamadı');
     return ctx.params.id as string;
@@ -340,6 +385,8 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     ledger,
     payments,
     wallet,
+    reviews,
+    assistant,
     flags,
     analysis,
     fairplay,

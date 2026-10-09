@@ -305,6 +305,7 @@
       nav.replaceChildren(...[
         el('a', { href: '#/' }, 'Lobi'),
         el('a', { href: '#/cuzdan', id: 'nav-wallet' }, 'Cüzdan'),
+        el('a', { href: '#/asistan', id: 'nav-assistant' }, 'Asistan'),
         isStaff() ? el('a', { href: '#/yonetim', id: 'nav-admin' }, 'Yönetim') : null,
         el('span', { class: 'who' }, session.user.displayName),
         el('button', { class: 'btn', type: 'button', onclick: logout }, 'Çıkış'),
@@ -331,6 +332,7 @@
       if (parts[0] === 'oyun' && parts[1]) return (cleanup = gameView(parts[1]));
       if (parts[0] === 'turnuva' && parts[1]) return (cleanup = tournamentView(parts[1], params));
       if (parts[0] === 'cuzdan') return (cleanup = await walletView());
+      if (parts[0] === 'asistan') return (cleanup = await assistantView(params.get('oyun')));
       if (parts[0] === 'yonetim') return (cleanup = await adminView(parts[1] || 'genel', parts[2], params));
       return (cleanup = await lobbyView());
     } catch (e) {
@@ -605,10 +607,114 @@
     const status = el('div', { class: 'card', id: 'game-status' });
     const movesEl = el('ol', { class: 'moves', id: 'moves' });
     const actions = el('div', { class: 'row', id: 'game-actions' });
+    const reviewEl = el('section', { class: 'card', id: 'review', hidden: true });
     mount(el('div', { class: 'game' },
       el('div', { class: 'board-wrap' }, top, boardEl, bottom),
-      el('div', { class: 'col tight' }, status, el('section', { class: 'card' }, el('h2', {}, 'Hamleler'), movesEl), el('section', { class: 'card' }, actions)),
+      el('div', { class: 'col tight' }, status, reviewEl, el('section', { class: 'card' }, el('h2', {}, 'Hamleler'), movesEl), el('section', { class: 'card' }, actions)),
     ));
+    let reviewState = null;
+    let reviewPoll = null;
+    let reportOpen = false;
+
+    // ---- K45: oyun sonu analizi, asistan ve şikayet ----
+    async function loadReview() {
+      try { reviewState = await api('GET', `/v1/games/${gameId}/review`); } catch (e) { reviewState = { status: 'error', message: e.message }; }
+      renderReview();
+    }
+    function renderReview() {
+      if (!s.ended || !s.myColor) { reviewEl.hidden = true; return; }
+      reviewEl.hidden = false;
+      const opp = s.state.players[s.myColor === 'w' ? 'b' : 'w'];
+      const head = el('div', { class: 'spread' }, el('h2', {}, 'Oyun analizi'),
+        el('a', { class: 'btn small', href: `#/asistan?oyun=${gameId}`, id: 'ask-coach' }, 'Asistana sor'));
+      const parts = [head];
+      const r = reviewState;
+      if (!r) parts.push(el('p', { class: 'small muted' }, 'Yükleniyor…'));
+      else if (r.status === 'ready') {
+        const CLS = [['best', 'En iyi'], ['good', 'İyi'], ['inaccuracy', 'Küçük hata'], ['mistake', 'Hata'], ['blunder', 'Büyük hata']];
+        const row = (color) => {
+          const p = r.players[color === 'w' ? 'white' : 'black'];
+          const total = Object.values(p.counts).reduce((a, b) => a + b, 0) || 1;
+          return el('div', { class: 'acc-row', dataset: { color } },
+            el('div', { class: 'spread' },
+              el('span', { class: 'pname' }, `${color === 'w' ? '○' : '●'} ${s.state.players[color].name || 'Bot'}${color === s.myColor ? ' (sen)' : ''}`),
+              el('b', { class: 'acc mono' }, p.accuracy === null ? '—' : `%${p.accuracy.toLocaleString('tr-TR')}`)),
+            el('div', { class: 'acc-bar', 'aria-hidden': 'true' }, CLS.map(([k]) => p.counts[k] ? el('i', { class: `c-${k}`, style: null, dataset: { w: Math.round((p.counts[k] / total) * 100) } }) : null)),
+            el('div', { class: 'acc-legend small' }, CLS.map(([k, label]) => el('span', { class: `c-${k}` }, `${label} ${p.counts[k]} (%${Math.round((p.counts[k] / total) * 100)})`))),
+          );
+        };
+        parts.push(row('w'), row('b'), evalGraph(r.evalGraph));
+        const key = r.moves.filter((m) => m.color === s.myColor && (m.class === 'mistake' || m.class === 'blunder'));
+        parts.push(el('div', { class: 'col tiny' }, el('span', { class: 'small muted' }, key.length ? 'Senin kritik anların' : 'Büyük hata yapmadın.'),
+          key.slice(0, 6).map((m) => el('div', { class: 'small' }, el('b', {}, `${Math.ceil(m.ply / 2)}${m.color === 'w' ? '.' : '...'} ${m.san}`), ` — ${m.class === 'blunder' ? 'büyük hata' : 'hata'}${m.bestSan ? ` · daha iyisi ${m.bestSan}` : ''}`))));
+      } else if (r.status === 'queued' || r.status === 'running') {
+        parts.push(el('p', { class: 'small', id: 'review-wait' }, 'Analiz ediliyor… Hazır olunca burada görünecek.'));
+        // Bildirim kaçarsa yedek: birkaç saniyede bir yokla.
+        clearTimeout(reviewPoll);
+        reviewPoll = setTimeout(() => void loadReview(), 4000);
+      } else if (r.status === 'error') {
+        parts.push(el('p', { class: 'small muted' }, r.message));
+      } else {
+        parts.push(el('p', { class: 'small muted' }, 'Bu oyunun doğruluk oranını, iyi hamlelerini ve hatalarını görmek için analiz et.'),
+          el('button', { class: 'btn primary', type: 'button', id: 'review-request', onclick: async () => {
+            try {
+              const r2 = await api('POST', `/v1/games/${gameId}/review`);
+              // Analiz bu cevaptan önce bitmiş olabilir (WebSocket bildirimi önce gelir): hazır sonucu ezme.
+              if (reviewState?.status !== 'ready') { reviewState = r2; renderReview(); }
+              if (r2.status === 'ready') await loadReview();
+            } catch (e) { toast(e.message); }
+          } }, 'Analiz et'));
+      }
+      if (opp?.id && opp.id !== session.user.id && s.state.kind !== 'bot') {
+        if (!reportOpen) parts.push(el('button', { class: 'link small', type: 'button', id: 'report-open', onclick: () => { reportOpen = true; renderReview(); } }, 'Rakibi şikayet et'));
+        else {
+          const cat = el('select', { id: 'report-category' }, el('option', { value: 'cheating' }, 'Hile şüphesi'), el('option', { value: 'abuse' }, 'Kötü davranış'), el('option', { value: 'other' }, 'Diğer'));
+          const txt = el('textarea', { id: 'report-text', rows: 3, maxlength: 1000, placeholder: 'Neden şikayet ediyorsun? Kısaca anlat.' });
+          const form = el('form', { class: 'stack', id: 'report-form' },
+            el('label', { class: 'field' }, el('span', {}, 'Şikayet türü'), cat),
+            el('label', { class: 'field' }, el('span', {}, 'Açıklama'), txt),
+            el('p', { class: 'small muted' }, 'Şikayetin inceleme ekibine iletilir; kararı insanlar verir. Aynı oyun için bir kez şikayet edebilirsin.'),
+            el('div', { class: 'row' }, el('button', { class: 'btn primary', type: 'submit' }, 'Gönder'), el('button', { class: 'btn', type: 'button', onclick: () => { reportOpen = false; renderReview(); } }, 'Vazgeç')),
+          );
+          form.addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            try {
+              await api('POST', `/v1/games/${gameId}/report`, { category: cat.value, text: txt.value });
+              reportOpen = false;
+              toast('Şikayetin alındı. İnceleme ekibi değerlendirecek.');
+              renderReview();
+            } catch (e) { toast(e.message); }
+          });
+          parts.push(form);
+        }
+      }
+      reviewEl.replaceChildren(...parts);
+      for (const i of reviewEl.querySelectorAll('.acc-bar i')) i.style.flexGrow = i.dataset.w;
+    }
+    function evalGraph(values) {
+      const W = 300;
+      const H = 70;
+      const n = Math.max(values.length, 2);
+      const y = (v) => H / 2 - (Math.max(-1000, Math.min(1000, v)) / 1000) * (H / 2 - 2);
+      const pts = values.map((v, i) => `${((i / (n - 1)) * W).toFixed(1)},${y(v).toFixed(1)}`);
+      const svgNs = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(svgNs, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('class', 'eval-graph');
+      svg.setAttribute('role', 'img');
+      svg.setAttribute('aria-label', 'Oyun boyunca değerlendirme grafiği (üst beyaz üstün, alt siyah üstün)');
+      const area = document.createElementNS(svgNs, 'polygon');
+      area.setAttribute('points', `0,${H} ${pts.join(' ')} ${W},${H}`);
+      area.setAttribute('class', 'eg-area');
+      const mid = document.createElementNS(svgNs, 'line');
+      mid.setAttribute('x1', '0'); mid.setAttribute('x2', String(W)); mid.setAttribute('y1', String(H / 2)); mid.setAttribute('y2', String(H / 2));
+      mid.setAttribute('class', 'eg-mid');
+      const line = document.createElementNS(svgNs, 'polyline');
+      line.setAttribute('points', pts.join(' '));
+      line.setAttribute('class', 'eg-line');
+      svg.append(area, mid, line);
+      return el('div', { class: 'eval-wrap' }, svg);
+    }
 
     function rebuild(st) {
       s.state = st;
@@ -770,6 +876,8 @@
       renderStatus();
       renderMoves();
       renderActions();
+      if (s.ended && s.myColor && reviewState === null) { reviewState = undefined; void loadReview(); }
+      else renderReview();
     }
 
     const off = ws.on((m) => {
@@ -798,6 +906,8 @@
       } else if (m.type === 'game.presence') {
         s.offline[m.color] = !m.online;
         render();
+      } else if (m.type === 'review.ready') {
+        void loadReview();
       } else if (m.type === 'error' && (m.for || '').startsWith('game.')) {
         toast(m.message);
         resync();
@@ -814,6 +924,7 @@
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       off();
+      clearTimeout(reviewPoll);
       ws.drop(join);
       ws.send({ type: 'game.leave', gameId });
       clearInterval(ticker);
@@ -1157,6 +1268,66 @@
       if (/^(payment|prize|wallet|withdrawal)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
     });
     return () => { off(); clearTimeout(t); };
+  }
+
+  // ---- K45 satranç asistanı ------------------------------------------------------------
+
+  async function assistantView(gameId) {
+    if (!session.user) { location.hash = '#/giris'; return null; }
+    const LOCK = { LIVE_GAME: 'Devam eden bir oyunun var. Oyun sırasında asistan kapalıdır.', ACTIVE_TOURNAMENT: 'Süren bir turnuvadasın. Turnuva bitince asistanı kullanabilirsin.' };
+    const chat = el('div', { class: 'chat', id: 'assistant-chat', 'aria-live': 'polite' });
+    const info = el('p', { class: 'small muted', id: 'assistant-info' });
+    const input = el('textarea', { id: 'assistant-input', rows: 2, maxlength: 2000, placeholder: gameId ? 'Bu oyun hakkında sor…' : 'Sorunu yaz…' });
+    const sendBtn = el('button', { class: 'btn primary', type: 'submit' }, 'Gönder');
+    const form = el('form', { class: 'stack', id: 'assistant-form' }, input, el('div', { class: 'spread' }, info, sendBtn));
+    const quick = el('div', { class: 'quick' }, (gameId
+      ? ['Bu oyunda nerede hata yaptım?', 'Bu oyundan ne öğrenmeliyim?', 'Açılışım nasıldı?']
+      : ['Para nasıl çekerim?', 'Beraberlikte ne olur?', 'Rakibimi şikayet etmek istiyorum']
+    ).map((q) => el('button', { class: 'btn small', type: 'button', onclick: () => { input.value = q; form.requestSubmit(); } }, q)));
+    mount(el('section', { class: 'card narrow-wide', id: 'assistant' },
+      el('div', { class: 'spread' }, el('h1', {}, 'Satranç Asistanı'), gameId ? el('a', { class: 'btn small', href: `#/oyun/${gameId}` }, 'Oyuna dön') : null),
+      el('p', { class: 'small muted' }, gameId
+        ? 'Koç modu: bitmiş oyununu birlikte değerlendirelim. Asistan yalnız bitmiş oyunlarda yardım eder.'
+        : 'Kurallar, cüzdan, para çekme ve şikayetlerle ilgili sorularını yanıtlar. Oyunlarını değerlendirmek için oyun sayfasındaki "Asistana sor" düğmesini kullan.'),
+      chat, quick, form,
+    ));
+    let st = null;
+    const bubble = (role, text) => el('div', { class: `bubble ${role}` }, text);
+    async function load() {
+      st = await api('GET', '/v1/assistant');
+      const mine = st.messages.filter((m) => (gameId ? m.gameId === gameId : m.mode === 'support'));
+      chat.replaceChildren(...(mine.length ? mine.map((m) => bubble(m.role, m.content)) : [bubble('assistant', gameId ? 'Merhaba! Bu oyununla ilgili ne sormak istersin?' : 'Merhaba! Ben Satranç Asistanı. Nasıl yardımcı olabilirim?')]));
+      chat.scrollTop = chat.scrollHeight;
+      const blocked = !st.enabled ? 'Asistan şu anda kullanılamıyor.' : st.locked ? LOCK[st.locked] : st.remainingToday <= 0 ? 'Bugünkü soru hakkın doldu; yarın tekrar sorabilirsin.' : null;
+      info.textContent = blocked || `Bugün kalan soru hakkın: ${st.remainingToday}/${st.limit}`;
+      sendBtn.disabled = !!blocked;
+      input.disabled = !!blocked;
+    }
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      chat.append(bubble('user', text));
+      const wait = bubble('assistant', '…');
+      chat.append(wait);
+      chat.scrollTop = chat.scrollHeight;
+      sendBtn.disabled = true;
+      try {
+        const r = await api('POST', '/v1/assistant/messages', { text, ...(gameId ? { gameId } : {}), locale: 'tr' });
+        wait.textContent = r.reply;
+        if (r.actions?.some((a) => a.type === 'complaint')) toast('Şikayetin inceleme ekibine iletildi.');
+        info.textContent = `Bugün kalan soru hakkın: ${r.remainingToday}/${st.limit}`;
+      } catch (e) {
+        wait.remove();
+        toast(e.message);
+      } finally {
+        sendBtn.disabled = false;
+        chat.scrollTop = chat.scrollHeight;
+      }
+    });
+    await load();
+    return null;
   }
 
   // ---- yönetim paneli (M13) ---------------------------------------------------------

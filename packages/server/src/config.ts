@@ -66,6 +66,13 @@ export interface Config {
   payoutFeeEwalletFixedCents: number;
   payoutFeeEwalletBps: number;
   payoutFeeBankFixedCents: number;
+  /** K45 satranç asistanı: yapay zekâ mesaj API'si anahtarı (boşsa asistan kapalı), model ve adres. */
+  assistantApiKey: string | null;
+  assistantModel: string;
+  assistantApiBase: string;
+  /** K45: günlük soru hakkı (ücretsiz kullanıcı / son 30 günde ücretli turnuva oynayan). */
+  assistantDailyFree: number;
+  assistantDailyPaid: number;
   /** Orta risk: ödül bekletmesine eklenen süre (doküman 14.3). */
   riskMediumExtraHoldSec: number;
   /** Demo araçları (yalnız üretim dışı): ilk iki hesap yönetici, turnuvayı test botlarıyla doldurma. */
@@ -136,6 +143,11 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     payoutFeeEwalletFixedCents: num('PAYOUT_FEE_EWALLET_FIXED_CENTS', 100),
     payoutFeeEwalletBps: num('PAYOUT_FEE_EWALLET_BPS', 100),
     payoutFeeBankFixedCents: num('PAYOUT_FEE_BANK_FIXED_CENTS', 1500),
+    assistantApiKey: process.env.ASSISTANT_API_KEY || null,
+    assistantModel: process.env.ASSISTANT_MODEL || 'claude-haiku-5-5',
+    assistantApiBase: process.env.ASSISTANT_API_BASE || 'https://api.anthropic.com',
+    assistantDailyFree: num('ASSISTANT_DAILY_FREE', 5),
+    assistantDailyPaid: num('ASSISTANT_DAILY_PAID', 30),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');

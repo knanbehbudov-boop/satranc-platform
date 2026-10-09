@@ -223,3 +223,30 @@ details.card[open] > summary { margin-bottom: 10px; }
   .page { padding-inline: 10px; }
   .card { padding: 14px 12px; }
 }
+
+/* K45 oyun sonu analizi ve asistan */
+textarea { background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; width: 100%; font: inherit; color: inherit; resize: vertical; }
+.acc-row { display: grid; gap: 6px; }
+.acc-row .acc { font-size: 20px; color: var(--strong); }
+.acc-bar { display: flex; height: 10px; border-radius: 2px; overflow: hidden; background: var(--surface-2); }
+.acc-bar i { display: block; flex-basis: 0; min-width: 3px; }
+.acc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); }
+.acc-legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 0; background: currentColor; }
+.c-best { --c: #6f9f6f; }
+.c-good { --c: #a9a9a9; }
+.c-inaccuracy { --c: #d6a531; }
+.c-mistake { --c: #e07b39; }
+.c-blunder { --c: #d0463b; }
+.acc-bar i { background: var(--c); }
+.acc-legend span::before { background: var(--c); }
+.eval-wrap { background: var(--surface-2); border-radius: 4px; padding: 4px; }
+.eval-graph { display: block; width: 100%; height: 70px; }
+.eg-area { fill: #f3f3f3; }
+.eval-graph { background: #3a3a3a; }
+.eg-mid { stroke: #8c8c8c; stroke-width: 0.6; }
+.eg-line { fill: none; stroke: #8c8c8c; stroke-width: 1; }
+.chat { display: grid; gap: 10px; max-height: min(60vh, 560px); overflow-y: auto; padding: 4px; }
+.bubble { max-width: 88%; padding: 9px 12px; border-radius: 10px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble.user { justify-self: end; background: var(--accent); color: var(--accent-fg); border-bottom-right-radius: 2px; }
+.bubble.assistant { justify-self: start; background: var(--surface-2); border-bottom-left-radius: 2px; }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; }

@@ -77,6 +77,24 @@ try {
   await page.click('#resign-yes');
   await page.waitForSelector('#game-result');
   check((await page.textContent('#game-result')).includes('0-1'), 'Teslim: sonuç 0-1 ekranda');
+  await page.waitForSelector('#review-request');
+  check(true, 'Oyun bitince "Oyun analizi" kartı ve "Analiz et" düğmesi çıktı');
+  await page.click('#review-request');
+  await page.waitForSelector('#review .acc-row', { timeout: 30_000 }).catch(async (e) => {
+    console.log('DEBUG review:', await page.textContent('#review'), errors);
+    const gid = (await page.evaluate(() => location.hash)).split('/')[2];
+    console.log('DEBUG job:', (await env.app.pool.query('SELECT status, error, requested_by FROM analysis_jobs WHERE game_id = $1', [gid])).rows);
+    throw e;
+  });
+  const reviewText = await page.textContent('#review');
+  check(/%\d/.test(reviewText) && reviewText.includes('En iyi'), 'Analiz hazır: doğruluk yüzdesi ve hamle dağılımı görünüyor');
+  check(!/stockfish|motor adı/i.test(reviewText), 'Analizde motor adı geçmiyor');
+  if (shots) await page.screenshot({ path: join(shots, 'web-analiz.png'), fullPage: false });
+  await page.click('#ask-coach');
+  await page.waitForSelector('#assistant-info');
+  await page.waitForFunction(() => document.querySelector('#assistant-info')?.textContent.length > 0);
+  check((await page.textContent('#assistant')).includes('Koç modu'), 'Asistan sayfası koç modunda açıldı');
+  check((await page.textContent('#assistant-info')).includes('kullanılamıyor'), 'Asistan anahtarı yokken "kullanılamıyor" yazıyor');
 
   // ---- 3. Turnuva ----
   const code = uniqueName('e2e').toLowerCase();

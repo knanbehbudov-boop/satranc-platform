@@ -336,6 +336,72 @@ export class FairPlayService {
   }
 
   /** Yönetici: herhangi bir oyunu (ör. şikâyet) elle vaka kuyruğuna alır. */
+  /**
+   * Oyuncu şikayeti (K45). Yalnız bitmiş bir oyunu oynayan, rakibini şikayet edebilir; aynı oyun için
+   * bir kez, günde en fazla 5 şikayet. Şikayet bir adil oyun vakasına bağlanır (açık vaka varsa ona
+   * eklenir, yoksa "orta" seviyede yeni vaka açılır) ve oyun analiz edilmediyse analize alınır.
+   * Algoritma karar vermez: vaka yönetim panelinde insan tarafından sonuçlandırılır.
+   */
+  async reportPlayer(
+    reporterId: string,
+    gameId: string,
+    input: { category: 'cheating' | 'abuse' | 'other'; text: string; via?: 'form' | 'assistant' },
+    enqueueAnalysis?: (q: Queryable, gameId: string) => Promise<unknown>,
+  ): Promise<{ complaintId: string; caseId: string }> {
+    const text = String(input.text ?? '').trim();
+    if (text.length < 3 || text.length > 1000) throw new AppError(400, 'VALIDATION', 'Açıklama 3–1000 karakter olmalı');
+    if (!['cheating', 'abuse', 'other'].includes(input.category)) throw new AppError(400, 'VALIDATION', 'Geçersiz şikayet türü');
+    return this.pool.tx(async (tx) => {
+      const g = (await tx.query<{ id: string; status: string; white_id: string | null; black_id: string | null; match_id: string | null }>(
+        'SELECT id, status, white_id, black_id, match_id FROM games WHERE id = $1', [gameId])).rows[0];
+      if (!g) throw notFound('GAME_NOT_FOUND', 'Oyun bulunamadı');
+      if (g.white_id !== reporterId && g.black_id !== reporterId) throw new AppError(403, 'NOT_A_PLAYER', 'Yalnız oynadığın oyun için şikayette bulunabilirsin');
+      if (g.status !== 'finished') throw conflict('GAME_NOT_FINISHED', 'Şikayet oyun bitince yapılabilir');
+      const reported = g.white_id === reporterId ? g.black_id : g.white_id;
+      if (!reported) throw new AppError(400, 'NO_OPPONENT', 'Bot oyunlarında şikayet yapılamaz');
+      const today = await tx.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM complaints WHERE reporter_id = $1 AND created_at > now() - interval '1 day'`, [reporterId]);
+      if ((today.rows[0] as { n: number }).n >= 5) throw new AppError(429, 'COMPLAINT_LIMIT', 'Günlük şikayet sınırına ulaştın (5)');
+      const t = g.match_id ? (await tx.query<{ tournament_id: string }>('SELECT tournament_id FROM matches WHERE id = $1', [g.match_id])).rows[0]?.tournament_id ?? null : null;
+      const label = { cheating: 'hile şüphesi', abuse: 'kötü davranış', other: 'diğer' }[input.category];
+      const reason = { reason: `oyuncu şikayeti (${label}): ${text.slice(0, 300)}`, reporter: reporterId, game: gameId };
+      const open = await tx.query<{ id: string }>(
+        `SELECT id FROM fair_play_cases WHERE user_id = $1 AND COALESCE(tournament_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+           AND status = 'OPEN' FOR UPDATE`,
+        [reported, t],
+      );
+      let caseId: string;
+      if (open.rows[0]) {
+        caseId = open.rows[0].id;
+        await tx.query(
+          `UPDATE fair_play_cases SET reasons = reasons || $2::jsonb, games = CASE WHEN $3 = ANY(games) THEN games ELSE array_append(games, $3::uuid) END, updated_at = now() WHERE id = $1`,
+          [caseId, JSON.stringify([reason]), gameId],
+        );
+      } else {
+        const r = await tx.query<{ id: string }>(
+          `INSERT INTO fair_play_cases (user_id, tournament_id, level, max_score, reasons, games, source) VALUES ($1, $2, 'medium', 0, $3, ARRAY[$4::uuid], 'player_report') RETURNING id`,
+          [reported, t, JSON.stringify([reason]), gameId],
+        );
+        caseId = (r.rows[0] as { id: string }).id;
+      }
+      let complaintId: string;
+      try {
+        const c = await tx.query<{ id: string }>(
+          `INSERT INTO complaints (reporter_id, reported_id, game_id, category, text, via, case_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [reporterId, reported, gameId, input.category, text, input.via ?? 'form', caseId],
+        );
+        complaintId = (c.rows[0] as { id: string }).id;
+      } catch (e) {
+        if ((e as { code?: string }).code === '23505') throw conflict('ALREADY_REPORTED', 'Bu oyun için zaten şikayette bulundun');
+        throw e;
+      }
+      if (enqueueAnalysis) await enqueueAnalysis(tx, gameId);
+      await tx.query(`INSERT INTO audit_log (actor_id, action, target_type, target_id, data) VALUES ($1, 'complaint.create', 'fair_play_case', $2, $3)`,
+        [reporterId, caseId, { complaintId, gameId, reported, category: input.category, via: input.via ?? 'form' }]);
+      return { complaintId, caseId };
+    });
+  }
+
   async openManualCase(userId: string, tournamentId: string | null, actorId: string, note: string): Promise<string> {
     if (!note.trim()) throw new AppError(400, 'VALIDATION', 'Not gerekli');
     return this.pool.tx(async (tx) => {
