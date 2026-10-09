@@ -153,7 +153,22 @@ export class WsHub {
     for (const c of set) if (!filter || filter(c)) c.send(message);
   }
 
+  /** Kullanıcıya giden mesajları izleyenler (K46 bildirimleri: e-posta ve telefon bildirimi). */
+  private readonly userObservers: ((userId: string, message: unknown, online: boolean) => void)[] = [];
+
+  observeUserMessages(fn: (userId: string, message: unknown, online: boolean) => void): void {
+    this.userObservers.push(fn);
+  }
+
   sendToUser(userId: string, message: unknown): void {
-    for (const c of this.byUser.get(userId) ?? []) c.send(message);
+    const conns = this.byUser.get(userId);
+    for (const c of conns ?? []) c.send(message);
+    for (const fn of this.userObservers) {
+      try {
+        fn(userId, message, (conns?.size ?? 0) > 0);
+      } catch {
+        // Bildirim hatası mesaj teslimini bozmaz.
+      }
+    }
   }
 }

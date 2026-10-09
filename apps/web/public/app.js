@@ -307,7 +307,7 @@
         el('a', { href: '#/cuzdan', id: 'nav-wallet' }, 'Cüzdan'),
         el('a', { href: '#/asistan', id: 'nav-assistant' }, 'Asistan'),
         isStaff() ? el('a', { href: '#/yonetim', id: 'nav-admin' }, 'Yönetim') : null,
-        el('span', { class: 'who' }, session.user.displayName),
+        el('a', { class: 'who', href: '#/ayarlar', id: 'nav-settings', title: 'Ayarlar' }, session.user.displayName),
         el('button', { class: 'btn', type: 'button', onclick: logout }, 'Çıkış'),
       ].filter(Boolean));
     } else {
@@ -333,6 +333,7 @@
       if (parts[0] === 'turnuva' && parts[1]) return (cleanup = tournamentView(parts[1], params));
       if (parts[0] === 'cuzdan') return (cleanup = await walletView());
       if (parts[0] === 'asistan') return (cleanup = await assistantView(params.get('oyun')));
+      if (parts[0] === 'ayarlar') return (cleanup = await settingsView());
       if (parts[0] === 'yonetim') return (cleanup = await adminView(parts[1] || 'genel', parts[2], params));
       return (cleanup = await lobbyView());
     } catch (e) {
@@ -386,6 +387,7 @@
         el('label', { class: 'field' }, el('span', {}, 'Ülke'), el('select', { id: 'reg-country' }, COUNTRIES.map(([c, n]) => el('option', { value: c }, n)))),
       ),
       el('label', { class: 'check' }, el('input', { id: 'reg-tos', type: 'checkbox' }), el('span', {}, '18 yaşından büyüğüm; Kullanım Şartları ve Turnuva Kurallarını kabul ediyorum.')),
+      el('label', { class: 'check' }, el('input', { id: 'reg-news', type: 'checkbox' }), el('span', {}, 'Yeni turnuvalardan e-postayla haberdar olmak istiyorum (günde en fazla bir e-posta; istediğin zaman çıkabilirsin).')),
       el('p', { class: 'small muted' }, 'Doğum tarihin yalnızca yaş kontrolü için kullanılır; yalnız doğum yılın saklanır.'),
       el('p', { class: 'msg err form-error', hidden: true }),
       el('button', { class: 'btn primary', type: 'submit' }, 'Kayıt ol'),
@@ -402,6 +404,7 @@
           birthDate: form.querySelector('#reg-birth').value,
           countryCode: form.querySelector('#reg-country').value,
           acceptTos: form.querySelector('#reg-tos').checked,
+          newTournamentsEmail: form.querySelector('#reg-news').checked,
         });
         const done = el('section', { class: 'card narrow-wide' },
           el('h1', {}, 'Hesabın oluşturuldu'),
@@ -974,12 +977,15 @@
           actions.push(el('button', { class: 'btn', type: 'button', id: 'leave', onclick: async () => { try { await api('POST', `/v1/tournaments/${id}/leave`, {}); } catch (e) { toast(e.message); } } }, 'Vazgeç'));
         } else if (me) {
           actions.push(el('button', { class: 'btn', type: 'button', id: 'leave', onclick: async () => {
-            if (paid && !confirm(`Turnuvadan ayrılırsan ${money(d.entryFeeCents, d.currency)} ücretin kartına iade edilir. Ayrılmak istiyor musun?`)) return;
+            if (paid && !confirm(`Turnuvadan ayrılırsan ${money(d.entryFeeCents, d.currency)} ücretin iade edilir (bakiyeden ödediysen hemen bakiyene, kartla ödediysen kartına). Ayrılmak istiyor musun?`)) return;
             try {
               const r = await api('POST', `/v1/tournaments/${id}/leave`, {});
-              if (r.refund) toast('Ayrıldın. Ücretin iade ediliyor (birkaç gün içinde kartına yansır).', { href: '#/cuzdan', text: 'Cüzdan' });
+              if (r.refund) toast('Ayrıldın. Ücretin iade edildi.', { href: '#/cuzdan', text: 'Cüzdan' });
             } catch (e) { toast(e.message); }
           } }, 'Ayrıl'));
+          const slot = el('div', { id: 'nudge-slot' });
+          actions.push(slot);
+          void pushNudge().then((n) => { if (n) slot.replaceChildren(n); });
         } else if (session.user) actions.push(el('button', { class: 'btn accent', type: 'button', id: 'join', onclick: () => joinTournament(d) }, paid ? `Katıl · ${money(d.entryFeeCents, d.currency)}` : 'Katıl'));
         else actions.push(el('a', { class: 'btn primary', href: '#/giris' }, 'Katılmak için giriş yap'));
       }
@@ -1268,6 +1274,101 @@
       if (/^(payment|prize|wallet|withdrawal)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
     });
     return () => { off(); clearTimeout(t); };
+  }
+
+  // ---- K46 bildirimler ve ayarlar ----------------------------------------------------------
+
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  let swReg = null;
+  async function serviceWorker() {
+    if (!('serviceWorker' in navigator)) return null;
+    if (!swReg) swReg = await navigator.serviceWorker.register('/sw.js');
+    return swReg;
+  }
+  async function currentPushSubscription() {
+    if (!pushSupported()) return null;
+    const reg = await serviceWorker();
+    return reg ? reg.pushManager.getSubscription() : null;
+  }
+  /** Telefon bildirimlerini açar: izin ister, aboneliği sunucuya kaydeder. */
+  async function enablePush() {
+    if (!pushSupported()) {
+      throw new Error(isIos() && !isStandalone()
+        ? 'iPhone/iPad\'de bildirim için önce Paylaş → "Ana Ekrana Ekle" ile uygulamayı ekle, sonra oradan açıp tekrar dene.'
+        : 'Bu tarayıcı bildirimleri desteklemiyor.');
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') throw new Error('Bildirim izni verilmedi. Tarayıcı ayarlarından izin verebilirsin.');
+    const prefs = await api('GET', '/v1/me/notifications');
+    const reg = await serviceWorker();
+    const key = Uint8Array.from(atob(prefs.vapidPublicKey.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+    await api('POST', '/v1/me/push-subscriptions', sub.toJSON());
+    return true;
+  }
+  async function disablePush() {
+    const sub = await currentPushSubscription();
+    if (sub) {
+      await api('POST', '/v1/me/push-subscriptions/remove', { endpoint: sub.endpoint }).catch(() => undefined);
+      await sub.unsubscribe().catch(() => undefined);
+    }
+  }
+  /** Turnuvaya katılınca, bildirim kapalıysa küçük bir öneri gösterir. */
+  async function pushNudge() {
+    try {
+      if (!pushSupported() || Notification.permission !== 'default') return null;
+      if (await currentPushSubscription()) return null;
+    } catch { return null; }
+    return el('div', { class: 'msg info small', id: 'push-nudge' },
+      'Turnuvan başlarken telefonuna haber verelim mi? ',
+      el('button', { class: 'btn small', type: 'button', onclick: async (ev) => {
+        try { await enablePush(); toast('Bildirimler açıldı.'); ev.target.closest('#push-nudge')?.remove(); } catch (e) { toast(e.message); }
+      } }, 'Bildirimleri aç'));
+  }
+
+  async function settingsView() {
+    if (!session.user) { location.hash = '#/giris'; return null; }
+    const prefs = await api('GET', '/v1/me/notifications');
+    let sub = null;
+    try { sub = await currentPushSubscription(); } catch { sub = null; }
+    const news = el('input', { type: 'checkbox', id: 'pref-news', checked: prefs.newTournamentsEmail });
+    news.addEventListener('change', async () => {
+      try { await api('POST', '/v1/me/notifications', { newTournamentsEmail: news.checked }); toast(news.checked ? 'Yeni turnuva özetleri açıldı.' : 'Yeni turnuva özetlerinden çıktın.'); }
+      catch (e) { toast(e.message); news.checked = !news.checked; }
+    });
+    const pushState = el('p', { class: 'small', id: 'push-state' });
+    const pushBtn = el('button', { class: 'btn', type: 'button', id: 'push-toggle' });
+    function paintPush() {
+      const on = !!sub && Notification.permission === 'granted';
+      pushState.textContent = !pushSupported()
+        ? (isIos() && !isStandalone() ? 'iPhone/iPad\'de bildirim için: Safari\'de Paylaş → "Ana Ekrana Ekle", sonra uygulamayı ana ekrandan aç.' : 'Bu tarayıcı bildirimleri desteklemiyor.')
+        : on ? 'Bu cihazda bildirimler açık.' : 'Bu cihazda bildirimler kapalı.';
+      pushBtn.textContent = on ? 'Bu cihazda kapat' : 'Bu cihazda aç';
+      pushBtn.hidden = !pushSupported();
+    }
+    pushBtn.addEventListener('click', async () => {
+      try {
+        if (sub) { await disablePush(); sub = null; toast('Bildirimler kapatıldı.'); }
+        else { await enablePush(); sub = await currentPushSubscription(); toast('Bildirimler açıldı.'); }
+      } catch (e) { toast(e.message); }
+      paintPush();
+    });
+    paintPush();
+    mount(el('div', { class: 'col narrow-wide', id: 'settings' },
+      el('h1', {}, 'Ayarlar'),
+      el('section', { class: 'card' }, el('h2', {}, 'Hesap'),
+        el('p', {}, el('b', {}, session.user.displayName), el('span', { class: 'muted' }, ` · ${session.user.email}`))),
+      el('section', { class: 'card' }, el('h2', {}, 'Telefon bildirimleri'),
+        el('p', { class: 'small muted' }, 'Kayıtlı olduğun turnuva dolup başlarken ve sıradaki maçın başlarken bildirim alırsın.'),
+        pushState, pushBtn),
+      el('section', { class: 'card' }, el('h2', {}, 'E-posta'),
+        el('p', { class: 'small muted' }, 'Turnuva kaydı, başlama ve para çekme e-postaları her zaman gönderilir.'),
+        el('label', { class: 'check' }, news, el('span', {}, 'Yeni turnuvalardan haberdar et (günde en fazla bir özet e-posta)'))),
+      el('div', { class: 'row' }, el('a', { class: 'btn', href: '#/cuzdan' }, 'Cüzdan ve hesap kapatma')),
+    ));
+    return null;
   }
 
   // ---- K45 satranç asistanı ------------------------------------------------------------

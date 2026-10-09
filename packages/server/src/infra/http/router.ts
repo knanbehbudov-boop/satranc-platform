@@ -85,6 +85,7 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 export function securityHeaders(res: ServerResponse, secure: boolean): void {
@@ -185,7 +186,8 @@ export class Router {
     if (!file.startsWith(normalize(dir) + sep) || !existsSync(file) || !statSync(file).isFile()) return false;
     res.statusCode = 200;
     res.setHeader('Content-Type', MIME[extname(file)] ?? 'application/octet-stream');
-    res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
+    // Servis çalışanı (sw.js) her zaman taze alınır ki güncellemeler hemen yayılsın.
+    res.setHeader('Cache-Control', extname(file) === '.html' || file.endsWith('sw.js') ? 'no-cache' : 'public, max-age=300');
     if (req.method === 'HEAD') res.end();
     else createReadStream(file).pipe(res);
     return true;

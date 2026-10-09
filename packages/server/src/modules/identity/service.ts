@@ -98,7 +98,7 @@ export class IdentityService {
   };
 
   async register(
-    input: { email: string; password: string; displayName: string; birthDate: string; countryCode: string; acceptTos: boolean },
+    input: { email: string; password: string; displayName: string; birthDate: string; countryCode: string; acceptTos: boolean; newTournamentsEmail?: boolean | undefined },
     meta: RequestMeta,
   ): Promise<PublicUser> {
     const birth = new Date(`${input.birthDate}T00:00:00Z`);
@@ -116,9 +116,9 @@ export class IdentityService {
     try {
       return await this.pool.tx(async (tx) => {
         const r = await tx.query<UserRow>(
-          `INSERT INTO users (email, display_name, password_hash, country_code, birth_year, tos_version, tos_accepted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, now()) RETURNING *`,
-          [input.email, input.displayName, hash, input.countryCode, birth.getUTCFullYear(), this.cfg.tosVersion],
+          `INSERT INTO users (email, display_name, password_hash, country_code, birth_year, tos_version, tos_accepted_at, notify_new_tournaments, notify_consent_at)
+           VALUES ($1, $2, $3, $4, $5, $6, now(), $7, CASE WHEN $7 THEN now() END) RETURNING *`,
+          [input.email, input.displayName, hash, input.countryCode, birth.getUTCFullYear(), this.cfg.tosVersion, input.newTournamentsEmail === true],
         );
         let user = r.rows[0] as UserRow;
         if (this.cfg.demoTools) {
@@ -156,7 +156,7 @@ export class IdentityService {
       [
         user.email,
         'E-posta adresinizi doğrulayın',
-        `Merhaba ${user.display_name}, hesabınızı doğrulamak için bağlantıyı açın: /#/dogrula?token=${token}\nBağlantı 48 saat geçerlidir.`,
+        `Merhaba ${user.display_name},\n\nHesabınızı doğrulamak için bağlantıyı açın:\n${this.cfg.publicBaseUrl ?? ''}/#/dogrula?token=${token}\n\nBağlantı 48 saat geçerlidir.`,
         { token, displayName: user.display_name },
       ],
     );

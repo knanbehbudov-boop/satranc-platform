@@ -428,6 +428,7 @@ export class TournamentService {
         }
       }
       if (!isPaid) filled = await this.seatConfirmed(tx, t, notes);
+      if (!isPaid || fromWallet) notes.push(() => this.joinedNotice(userId, t));
       notes.push(() => this.notify(tournamentId));
       return { t, entryId: row.id, joinedAt: row.joined_at, expiresAt: row.expires_at, isPaid, fromWallet };
     });
@@ -498,6 +499,14 @@ export class TournamentService {
     return true;
   }
 
+  /** K46: kayıt onaylandı bildirimi (e-posta bildirim servisi bu mesajı izler). */
+  private joinedNotice(userId: string, t: TournamentRow): void {
+    this.hub.sendToUser(userId, {
+      type: 'tournament.joined', tournamentId: t.id, name: t.name, capacity: t.capacity,
+      entryFeeCents: Number(t.template.entry_fee_cents), readySeconds: t.template.ready_seconds,
+    });
+  }
+
   /** Bakiyeden ödenmiş koltuğun iadesi: emanetten, geldiği bakiye hesaplarına (idempotent). */
   private async refundWalletEntry(tx: Queryable, t: TournamentRow, e: WalletEntryRow): Promise<void> {
     await this.ledger.refundEntryToWallet(tx, {
@@ -563,6 +572,7 @@ export class TournamentService {
       await this.ledger.assignToPool(tx, { paymentId: e.paymentId, tournamentId: t.id, userId: e.userId, cents: e.amountCents, currency: e.currency });
       const filled = await this.seatConfirmed(tx, t, notes);
       notes.push(() => this.hub.sendToUser(e.userId, { type: 'payment.confirmed', tournamentId: t.id, paymentId: e.paymentId }));
+      notes.push(() => this.joinedNotice(e.userId, t));
       if (filled) notes.push(() => void this.ensureOpen().catch((err) => this.logger.error('Yeni turnuva açılamadı', { error: err })));
     } else {
       const reason = !amountOk ? 'amount_mismatch' : t.status !== 'OPEN' ? 'tournament_not_open' : 'seat_unavailable';

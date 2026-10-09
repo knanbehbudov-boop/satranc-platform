@@ -73,6 +73,19 @@ export interface Config {
   /** K45: günlük soru hakkı (ücretsiz kullanıcı / son 30 günde ücretli turnuva oynayan). */
   assistantDailyFree: number;
   assistantDailyPaid: number;
+  /** K46 e-posta (SMTP). Boşsa e-postalar kuyrukta kalır (geliştirmede posta kutusundan okunur). */
+  smtpHost: string | null;
+  smtpPort: number;
+  smtpSecure: boolean;
+  smtpStarttls: boolean;
+  smtpUser: string | null;
+  smtpPass: string | null;
+  mailFrom: string;
+  /** K46 Web Push (VAPID). Verilmezse sunucu bir kez üretir ve veritabanında saklar. */
+  vapidPublicKey: string | null;
+  vapidPrivateKey: string | null;
+  /** K46: yeni turnuva özet e-postasının gönderildiği saat (UTC). */
+  digestHourUtc: number;
   /** Orta risk: ödül bekletmesine eklenen süre (doküman 14.3). */
   riskMediumExtraHoldSec: number;
   /** Demo araçları (yalnız üretim dışı): ilk iki hesap yönetici, turnuvayı test botlarıyla doldurma. */
@@ -124,7 +137,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     pspWebhookSecret: required('PSP_WEBHOOK_SECRET', 'whsec_gelistirme_sandbox_anahtari'),
     stripeSecretKey: process.env.STRIPE_SECRET_KEY || null,
     stripeApiBase: process.env.STRIPE_API_BASE ?? 'https://api.stripe.com',
-    publicBaseUrl: process.env.PUBLIC_BASE_URL || null,
+    publicBaseUrl: process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || null,
     sandboxDeliveryDelayMs: num('SANDBOX_DELIVERY_DELAY_MS', 300),
     sandboxDuplicateRate: num('SANDBOX_DUPLICATE_RATE', 0.2),
     paidMinRatedGames: num('PAID_MIN_RATED_GAMES', 10),
@@ -148,6 +161,16 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     assistantApiBase: process.env.ASSISTANT_API_BASE || 'https://api.anthropic.com',
     assistantDailyFree: num('ASSISTANT_DAILY_FREE', 5),
     assistantDailyPaid: num('ASSISTANT_DAILY_PAID', 30),
+    smtpHost: process.env.SMTP_HOST || null,
+    smtpPort: num('SMTP_PORT', 465),
+    smtpSecure: bool('SMTP_SECURE', true),
+    smtpStarttls: bool('SMTP_STARTTLS', true),
+    smtpUser: process.env.SMTP_USER || null,
+    smtpPass: process.env.SMTP_PASS || null,
+    mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || 'bildirim@localhost',
+    vapidPublicKey: process.env.VAPID_PUBLIC_KEY || null,
+    vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || null,
+    digestHourUtc: num('DIGEST_HOUR_UTC', 15),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');

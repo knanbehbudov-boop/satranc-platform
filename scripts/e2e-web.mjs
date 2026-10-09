@@ -96,6 +96,18 @@ try {
   check((await page.textContent('#assistant')).includes('Koç modu'), 'Asistan sayfası koç modunda açıldı');
   check((await page.textContent('#assistant-info')).includes('kullanılamıyor'), 'Asistan anahtarı yokken "kullanılamıyor" yazıyor');
 
+  // ---- 2b. Ayarlar: yeni turnuva özeti izni (varsayılan kapalı) ----
+  await page.click('#nav-settings');
+  await page.waitForSelector('#settings #pref-news');
+  check(!(await page.isChecked('#pref-news')), 'Ayarlar: yeni turnuva e-postası varsayılan kapalı');
+  await page.check('#pref-news');
+  await page.waitForFunction(async () => true);
+  await sleep(300);
+  const optIn = (await env.app.pool.query('SELECT notify_new_tournaments FROM users WHERE lower(email) = lower($1)', [email])).rows[0].notify_new_tournaments;
+  check(optIn === true, 'Ayarlar: kutucuk işaretlenince izin kaydedildi');
+  check((await page.textContent('#push-state')).length > 0, 'Ayarlar: telefon bildirimi durumu görünüyor');
+  if (shots) await page.screenshot({ path: join(shots, 'web-ayarlar.png'), fullPage: true });
+
   // ---- 3. Turnuva ----
   const code = uniqueName('e2e').toLowerCase();
   await env.app.pool.query(

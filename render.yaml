@@ -36,6 +36,12 @@ services:
         value: info
       - key: ASSISTANT_API_KEY
         sync: false               # satranç asistanı için yapay zekâ API anahtarı (boşsa asistan kapalı)
+      - key: SMTP_HOST
+        value: smtp.gmail.com     # e-posta: Gmail ile gönderim
+      - key: SMTP_USER
+        sync: false               # gönderen Gmail adresi
+      - key: SMTP_PASS
+        sync: false               # Gmail "uygulama şifresi" (normal şifre değil)
 databases:
   - name: satranc-db
     plan: free

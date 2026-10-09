@@ -34,6 +34,8 @@ import { StripePsp } from './modules/payments/stripe.ts';
 import { WalletService, type PayoutMethod } from './modules/wallet/service.ts';
 import { ReviewService } from './modules/review/service.ts';
 import { AssistantService, MessagesApiProvider } from './modules/assistant/service.ts';
+import { NotificationService } from './modules/notify/service.ts';
+import { RawResponse } from './infra/http/router.ts';
 import { RULES } from './infra/http/ratelimit.ts';
 import { notFound } from './infra/errors.ts';
 
@@ -56,6 +58,7 @@ export interface App {
   wallet: WalletService;
   reviews: ReviewService;
   assistant: AssistantService;
+  notifications: NotificationService;
   flags: FlagService;
   analysis: AnalysisService;
   fairplay: FairPlayService;
@@ -243,6 +246,33 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     ev.topic === 'analysis.completed' ? fairplay.onAnalysisCompleted(ev, tx, hooks) : fairplay.onAnalysisFailed(ev, tx));
   tournaments.riskGate = fairplay.gate;
 
+  // ---- K46 bildirimler ----
+  const notifications = new NotificationService({ pool, cfg, logger: logger.child({ part: 'notify' }), hub });
+  router.get('/v1/me/notifications', async (ctx) => notifications.prefs(ctx.requireUser().id));
+  router.post('/v1/me/notifications', async (ctx) => {
+    const b = (ctx.body ?? {}) as { newTournamentsEmail?: unknown };
+    return notifications.setPrefs(ctx.requireUser().id, typeof b.newTournamentsEmail === 'boolean' ? { newTournamentsEmail: b.newTournamentsEmail } : {});
+  });
+  router.post('/v1/me/push-subscriptions', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`push:${u.id}`, RULES.join);
+    return notifications.subscribe(u.id, (ctx.body ?? {}) as { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } }, ctx.userAgent);
+  });
+  router.post('/v1/me/push-subscriptions/remove', async (ctx) => {
+    const b = (ctx.body ?? {}) as { endpoint?: unknown };
+    return notifications.unsubscribePush(ctx.requireUser().id, String(b.endpoint ?? ''));
+  });
+  const unsubscribePage = async (ctx: { query: URLSearchParams }) => {
+    const u = ctx.query.get('u') ?? '';
+    const ok = isUuid(u) && (await notifications.unsubscribeByLink(u, ctx.query.get('t') ?? ''));
+    const msg = ok ? 'Yeni turnuva duyurularından çıktın. Turnuvalarına ait bildirimler (kayıt, başlama) gelmeye devam eder.' : 'Bağlantı geçersiz.';
+    return new RawResponse('text/html; charset=utf-8',
+      `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bildirimler</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><h1>Bildirimler</h1><p>${msg}</p><p><a href="/">Siteye dön</a></p></body>`,
+      ok ? 200 : 400);
+  };
+  router.get('/v1/notifications/unsubscribe', unsubscribePage);
+  router.post('/v1/notifications/unsubscribe', unsubscribePage);
+
   // ---- K45 oyun sonu analizi, şikayet, satranç asistanı ----
   const reviews = new ReviewService({ pool, analysis });
   events.subscribe('review-notify', ['analysis.completed'], async (ev, tx, hooks) => {
@@ -387,6 +417,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     wallet,
     reviews,
     assistant,
+    notifications,
     flags,
     analysis,
     fairplay,
@@ -401,6 +432,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       payments.start();
       sandbox?.start();
       analysis.start();
+      notifications.start();
       await games.start();
       await tournaments.start();
       await demo?.start().catch((e) => logger.error('Demo botları başlatılamadı', { error: e }));
@@ -411,6 +443,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       payments.stop();
       sandbox?.stop();
       analysis.stop();
+      notifications.stop();
       tournaments.stop();
       demo?.stop();
       games.stop();
