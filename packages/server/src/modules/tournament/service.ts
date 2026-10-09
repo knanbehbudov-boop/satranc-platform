@@ -68,8 +68,10 @@ export interface TemplateSnapshot {
 export type RiskGate = (q: Queryable, tournamentId: string) => Promise<{ wait: boolean; hold: string[] | 'all'; delay: string[] }>;
 
 export interface JoinResult {
-  status: 'OPEN' | 'STARTING' | 'RESERVED';
+  status: 'OPEN' | 'STARTING' | 'RESERVED' | 'CONFIRMED';
   entryId: string;
+  /** K43: ücret bakiyeden ödendi. */
+  paidFrom?: 'wallet';
   expiresAt?: string;
   paymentId?: string | null;
   checkoutUrl?: string | null;
@@ -108,6 +110,17 @@ interface MatchRow {
 }
 
 type Notes = (() => void)[];
+
+interface WalletEntryRow {
+  id: string;
+  user_id: string;
+  status: string;
+  payment_id: string | null;
+  paid_from: 'card' | 'wallet' | null;
+  joined_at: Date;
+  wallet_deposit_cents: number;
+  wallet_winnings_cents: number;
+}
 
 const ACTIVE_STATUSES: TournamentStatus[] = ['OPEN', 'FULL', 'STARTING', 'RUNNING'];
 
@@ -327,7 +340,7 @@ export class TournamentService {
 
   // ---- katılım ---------------------------------------------------------------
 
-  async join(userId: string, tournamentId: string, meta: { ip: string; deviceKey: string | null }): Promise<JoinResult> {
+  async join(userId: string, tournamentId: string, meta: { ip: string; deviceKey: string | null; useWallet?: boolean }): Promise<JoinResult> {
     const user = await this.identity.assertCanCompete(userId);
     const pre = await this.pool.query<TournamentRow>('SELECT * FROM tournaments WHERE id = $1', [tournamentId]);
     if (!pre.rows[0]) throw notFound('TOURNAMENT_NOT_FOUND', 'Turnuva bulunamadı');
@@ -390,12 +403,37 @@ export class TournamentService {
       );
       const row = ins.rows[0];
       if (!row) throw conflict('ALREADY_JOINED', 'Bu turnuvaya zaten katıldınız');
+      let fromWallet = false;
+      if (isPaid && meta.useWallet !== false) {
+        // K43: bakiye yeterliyse ücret cüzdandan emanete; koltuk hemen onaylanır.
+        await tx.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+        const split = await this.ledger.payEntryFromWallet(tx, {
+          key: `entry:${row.id}:${row.joined_at.getTime()}`,
+          entryId: row.id,
+          tournamentId,
+          userId,
+          cents: Number(tpl.entry_fee_cents),
+          currency: tpl.currency,
+        });
+        if (split) {
+          fromWallet = true;
+          await tx.query(
+            `UPDATE entries SET status = 'CONFIRMED', expires_at = NULL, paid_from = 'wallet', wallet_deposit_cents = $2, wallet_winnings_cents = $3 WHERE id = $1`,
+            [row.id, split.depositCents, split.winningsCents],
+          );
+          filled = await this.seatConfirmed(tx, t, notes);
+          notes.push(() => this.hub.sendToUser(userId, { type: 'payment.confirmed', tournamentId, paymentId: null, fromWallet: true }));
+        } else if (meta.useWallet === true) {
+          throw conflict('INSUFFICIENT_BALANCE', 'Bakiyeniz bu turnuva için yetersiz');
+        }
+      }
       if (!isPaid) filled = await this.seatConfirmed(tx, t, notes);
       notes.push(() => this.notify(tournamentId));
-      return { t, entryId: row.id, joinedAt: row.joined_at, expiresAt: row.expires_at, isPaid };
+      return { t, entryId: row.id, joinedAt: row.joined_at, expiresAt: row.expires_at, isPaid, fromWallet };
     });
     if (filled) await this.ensureOpen();
     if (!seat.isPaid) return { status: filled ? 'STARTING' : 'OPEN', entryId: seat.entryId };
+    if (seat.fromWallet) return { status: filled ? 'STARTING' : 'CONFIRMED', entryId: seat.entryId, paidFrom: 'wallet' };
     // Ödeme sağlayıcısı çağrısı işlem dışında; başarısız olursa koltuk rezervede kalır, /pay ile tekrar denenir.
     let pay: { paymentId: string; checkoutUrl: string | null } | null = null;
     try {
@@ -460,6 +498,18 @@ export class TournamentService {
     return true;
   }
 
+  /** Bakiyeden ödenmiş koltuğun iadesi: emanetten, geldiği bakiye hesaplarına (idempotent). */
+  private async refundWalletEntry(tx: Queryable, t: TournamentRow, e: WalletEntryRow): Promise<void> {
+    await this.ledger.refundEntryToWallet(tx, {
+      key: `entry:${e.id}:${e.joined_at.getTime()}`,
+      entryId: e.id,
+      tournamentId: t.id,
+      userId: e.user_id,
+      split: { depositCents: Number(e.wallet_deposit_cents), winningsCents: Number(e.wallet_winnings_cents) },
+      currency: t.template.currency,
+    });
+  }
+
   /** İade talebini işlem sonrası adımlarla bağlar. */
   private refundHook(notes: Notes) {
     return { afterCommit: (fn: () => void) => notes.push(fn) };
@@ -469,15 +519,20 @@ export class TournamentService {
     return this.withTx(async (tx, notes) => {
       const t = await this.lock(tx, tournamentId);
       if (t.status !== 'OPEN') throw conflict('CANNOT_LEAVE', 'Turnuva başladıktan sonra ayrılınamaz; maçınız hükmen kaybedilir');
-      const r = await tx.query<{ id: string; status: string; payment_id: string | null }>(
-        `SELECT id, status, payment_id FROM entries WHERE tournament_id = $1 AND user_id = $2 AND status IN ('RESERVED', 'CONFIRMED') FOR UPDATE`,
+      const r = await tx.query<WalletEntryRow>(
+        `SELECT id, user_id, status, payment_id, paid_from, joined_at, wallet_deposit_cents, wallet_winnings_cents
+         FROM entries WHERE tournament_id = $1 AND user_id = $2 AND status IN ('RESERVED', 'CONFIRMED') FOR UPDATE`,
         [tournamentId, userId],
       );
       const e = r.rows[0];
       if (!e) throw notFound('NOT_JOINED', 'Bu turnuvada kaydınız yok');
       await tx.query(`UPDATE entries SET status = 'WITHDRAWN', exit_reason = 'left', expires_at = NULL, ready_at = NULL WHERE id = $1`, [e.id]);
       let refund = false;
-      if (e.payment_id && e.status === 'RESERVED') {
+      if (e.paid_from === 'wallet' && e.status === 'CONFIRMED') {
+        // Bakiyeden ödenmiş koltuk: emanetten bakiyeye anında tam iade.
+        await this.refundWalletEntry(tx, t, e);
+        refund = true;
+      } else if (e.payment_id && e.status === 'RESERVED') {
         // Ödenmemiş: ödeme iptal; yine de para gelirse koltuksuz kaldığı için yetim iade edilir.
         await this.payments.cancelPending(tx, e.payment_id);
       } else if (e.payment_id && e.status === 'CONFIRMED') {
@@ -504,7 +559,7 @@ export class TournamentService {
     const seatOk = !!en && en.user_id === e.userId && en.status === 'RESERVED' && (en.payment_id === null || en.payment_id === e.paymentId) && t.status === 'OPEN';
     const amountOk = e.amountCents === Number(tpl.entry_fee_cents) && e.currency === tpl.currency;
     if (seatOk && amountOk) {
-      await tx.query(`UPDATE entries SET status = 'CONFIRMED', payment_id = $2, expires_at = NULL WHERE id = $1`, [en.id, e.paymentId]);
+      await tx.query(`UPDATE entries SET status = 'CONFIRMED', payment_id = $2, expires_at = NULL, paid_from = 'card' WHERE id = $1`, [en.id, e.paymentId]);
       await this.ledger.assignToPool(tx, { paymentId: e.paymentId, tournamentId: t.id, userId: e.userId, cents: e.amountCents, currency: e.currency });
       const filled = await this.seatConfirmed(tx, t, notes);
       notes.push(() => this.hub.sendToUser(e.userId, { type: 'payment.confirmed', tournamentId: t.id, paymentId: e.paymentId }));
@@ -559,6 +614,16 @@ export class TournamentService {
     let n = 0;
     for (const p of paid.rows) {
       if (await this.payments.requestRefund(tx, { paymentId: p.payment_id, source: 'pool', reason }, this.refundHook(notes))) n++;
+    }
+    const wallet = await tx.query<WalletEntryRow>(
+      `SELECT id, user_id, status, payment_id, paid_from, joined_at, wallet_deposit_cents, wallet_winnings_cents
+       FROM entries WHERE tournament_id = $1 AND paid_from = 'wallet' AND status IN ('CONFIRMED', 'ELIMINATED', 'WINNER', 'DISQUALIFIED')`,
+      [tournamentId],
+    );
+    const tr = (await tx.query<TournamentRow>('SELECT * FROM tournaments WHERE id = $1', [tournamentId])).rows[0] as TournamentRow;
+    for (const e of wallet.rows) {
+      await this.refundWalletEntry(tx, tr, e);
+      n++;
     }
     // Rezervede kalan ödenmemiş koltuklar da bırakılır.
     const reserved = await tx.query<{ payment_id: string | null }>(

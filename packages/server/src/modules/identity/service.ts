@@ -44,6 +44,8 @@ interface UserRow {
   roles: string[];
   email_verified_at: Date | null;
   created_at: Date;
+  closing_requested_at?: Date | null;
+  closed_at?: Date | null;
 }
 
 export interface RequestMeta {
@@ -196,6 +198,7 @@ export class IdentityService {
     if (user.status === 'banned' || user.status === 'frozen') {
       throw forbidden('ACCOUNT_LOCKED', user.status === 'banned' ? 'Hesap kapatılmış' : 'Hesap geçici olarak dondurulmuş');
     }
+    if (user.closed_at) throw forbidden('ACCOUNT_CLOSED', 'Bu hesap kullanıcının isteğiyle kapatıldı');
     if (needsRehash(user.password_hash)) {
       await this.pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [user.id, await hashPassword(password)]);
     }
@@ -338,6 +341,7 @@ export class IdentityService {
   async assertCanCompete(userId: string): Promise<UserRow> {
     const u = await this.getRow(userId);
     if (u.status !== 'active') throw forbidden('ACCOUNT_RESTRICTED', 'Hesabınız turnuvaya katılamaz');
+    if (u.closing_requested_at || u.closed_at) throw forbidden('ACCOUNT_CLOSING', 'Hesabınız kapatılıyor; yeni turnuvaya katılamazsınız');
     if (!u.email_verified_at) throw forbidden('EMAIL_NOT_VERIFIED', 'Turnuvaya katılmak için e-posta adresinizi doğrulayın');
     return u;
   }

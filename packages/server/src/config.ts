@@ -57,6 +57,15 @@ export interface Config {
   analysisSkipPlies: number;
   /** Ücretsiz turnuva oyunlarını da analiz et (geliştirme/demo; üretimde maliyet nedeniyle kapalı). */
   analyzeFreeGames: boolean;
+  /** K43 cüzdan: tek seferde yüklenebilecek en az / en çok tutar (cent). */
+  walletMinDepositCents: number;
+  walletMaxDepositCents: number;
+  /** K43: en az çekim tutarı (hesap kapatırken uygulanmaz). */
+  withdrawMinCents: number;
+  /** K43: tahmini çekim komisyonu (banka/sağlayıcı alır, platforma ait değildir). */
+  payoutFeeEwalletFixedCents: number;
+  payoutFeeEwalletBps: number;
+  payoutFeeBankFixedCents: number;
   /** Orta risk: ödül bekletmesine eklenen süre (doküman 14.3). */
   riskMediumExtraHoldSec: number;
   /** Demo araçları (yalnız üretim dışı): ilk iki hesap yönetici, turnuvayı test botlarıyla doldurma. */
@@ -121,6 +130,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     analyzeFreeGames: bool('ANALYZE_FREE_GAMES', false),
     riskMediumExtraHoldSec: num('RISK_MEDIUM_EXTRA_HOLD_SEC', 24 * 3600),
     demoTools: bool('DEMO_TOOLS', false),
+    walletMinDepositCents: num('WALLET_MIN_DEPOSIT_CENTS', 2000),
+    walletMaxDepositCents: num('WALLET_MAX_DEPOSIT_CENTS', 100_000),
+    withdrawMinCents: num('WITHDRAW_MIN_CENTS', 2000),
+    payoutFeeEwalletFixedCents: num('PAYOUT_FEE_EWALLET_FIXED_CENTS', 100),
+    payoutFeeEwalletBps: num('PAYOUT_FEE_EWALLET_BPS', 100),
+    payoutFeeBankFixedCents: num('PAYOUT_FEE_BANK_FIXED_CENTS', 1500),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');

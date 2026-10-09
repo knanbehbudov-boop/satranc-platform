@@ -13,6 +13,10 @@
  *   PLATFORM_REVENUE:<cur>       GELİR       komisyon
  *   PSP_FEES:<cur>               GİDER       ödeme sağlayıcı ücreti
  *   CHARGEBACKS:<cur>            GİDER       ters ibraz kayıpları
+ *   USER_WALLET:<uid>:<cur>      YÜKÜMLÜLÜK  yüklenen bakiye (K43)
+ *   PAYOUTS_PENDING:<cur>        YÜKÜMLÜLÜK  talep edilmiş, henüz ödenmemiş çekimler (K43)
+ *   PAYOUTS_SENT:<cur>           VARLIK      platform banka hesabından elle gönderilen çekimler (K43;
+ *                                            ödeme sağlayıcısı bağlanınca PSP_CLEARING'e döner)
  */
 import { Pool, type Queryable } from '../../infra/db/pg.ts';
 import type { Award } from './prizes.ts';
@@ -20,7 +24,8 @@ import type { Award } from './prizes.ts';
 export type AccountType = 'ASSET' | 'LIABILITY' | 'REVENUE' | 'EXPENSE';
 export type Reason =
   | 'ENTRY_PAID' | 'ENTRY_REFUND' | 'PAYMENT_ORPHAN_REFUND' | 'PSP_FEE' | 'TOURNAMENT_SETTLE'
-  | 'PRIZE_RELEASE' | 'PRIZE_VOID' | 'CHARGEBACK' | 'PAYOUT' | 'PAYOUT_REVERSAL' | 'ADJUSTMENT';
+  | 'PRIZE_RELEASE' | 'PRIZE_VOID' | 'CHARGEBACK' | 'PAYOUT' | 'PAYOUT_REVERSAL' | 'ADJUSTMENT'
+  | 'DEPOSIT' | 'WALLET_ENTRY' | 'WALLET_REFUND' | 'PAYOUT_REQUEST';
 
 export interface AccountRef {
   code: string;
@@ -44,7 +49,15 @@ export const ACC = {
   revenue: (cur: string): AccountRef => ({ code: `PLATFORM_REVENUE:${cur}`, type: 'REVENUE' }),
   pspFees: (cur: string): AccountRef => ({ code: `PSP_FEES:${cur}`, type: 'EXPENSE' }),
   chargebacks: (cur: string): AccountRef => ({ code: `CHARGEBACKS:${cur}`, type: 'EXPENSE' }),
+  wallet: (uid: string, cur: string): AccountRef => ({ code: `USER_WALLET:${uid}:${cur}`, type: 'LIABILITY', owner: uid }),
+  payoutsPending: (cur: string): AccountRef => ({ code: `PAYOUTS_PENDING:${cur}`, type: 'LIABILITY' }),
+  payoutsSent: (cur: string): AccountRef => ({ code: `PAYOUTS_SENT:${cur}`, type: 'ASSET' }),
 };
+
+export interface WalletSplit {
+  depositCents: number;
+  winningsCents: number;
+}
 
 export interface PostResult {
   transactionId: string;
@@ -247,6 +260,120 @@ export class LedgerService {
     });
   }
 
+  // ---- cüzdan (K43) ---------------------------------------------------------------
+
+  /** Bakiye yükleme ödemesi alındı: geçici tahsilattan kullanıcının cüzdanına. */
+  async creditDeposit(q: Queryable, p: { paymentId: string; userId: string; cents: number; currency: string }): Promise<void> {
+    await this.post(q, {
+      key: `payment:${p.paymentId}:deposit`,
+      reason: 'DEPOSIT',
+      currency: p.currency,
+      refType: 'payment',
+      refId: p.paymentId,
+      memo: `Bakiye yükleme (${p.userId})`,
+      lines: [
+        { account: ACC.paymentIn(p.currency), dir: 'D', cents: p.cents },
+        { account: ACC.wallet(p.userId, p.currency), dir: 'C', cents: p.cents },
+      ],
+    });
+  }
+
+  /** Kullanıcının harcanabilir bakiyesi: yüklenen + çekilebilir ödül. */
+  async spendable(q: Queryable, userId: string, currency: string): Promise<WalletSplit> {
+    return {
+      depositCents: await this.balance(q, ACC.wallet(userId, currency).code),
+      winningsCents: await this.balance(q, ACC.available(userId, currency).code),
+    };
+  }
+
+  /**
+   * Turnuva ücretini cüzdandan emanete aktarır: önce yüklenen bakiye, sonra ödül bakiyesi.
+   * Yetersizse hiçbir şey yazmadan null döner. Çağıran kullanıcının bakiye satırlarını kilitlemiş olmalı.
+   */
+  async payEntryFromWallet(q: Queryable, p: { key: string; entryId: string; tournamentId: string; userId: string; cents: number; currency: string }): Promise<WalletSplit | null> {
+    const have = await this.spendable(q, p.userId, p.currency);
+    if (have.depositCents + have.winningsCents < p.cents) return null;
+    const fromDeposit = Math.min(have.depositCents, p.cents);
+    const split = { depositCents: fromDeposit, winningsCents: p.cents - fromDeposit };
+    await this.post(q, {
+      key: `${p.key}:pay`,
+      reason: 'WALLET_ENTRY',
+      currency: p.currency,
+      refType: 'entry',
+      refId: p.entryId,
+      memo: `Turnuva ${p.tournamentId} giriş ücreti, bakiyeden (${p.userId})`,
+      lines: [
+        { account: ACC.wallet(p.userId, p.currency), dir: 'D', cents: split.depositCents },
+        { account: ACC.available(p.userId, p.currency), dir: 'D', cents: split.winningsCents },
+        { account: ACC.pool(p.tournamentId), dir: 'C', cents: p.cents },
+      ],
+    });
+    return split;
+  }
+
+  /** Bakiyeden ödenmiş koltuğun iadesi: emanetten, geldiği hesaplara geri. */
+  async refundEntryToWallet(q: Queryable, p: { key: string; entryId: string; tournamentId: string; userId: string; split: WalletSplit; currency: string }): Promise<void> {
+    await this.post(q, {
+      key: `${p.key}:refund`,
+      reason: 'WALLET_REFUND',
+      currency: p.currency,
+      refType: 'entry',
+      refId: p.entryId,
+      lines: [
+        { account: ACC.pool(p.tournamentId), dir: 'D', cents: p.split.depositCents + p.split.winningsCents },
+        { account: ACC.wallet(p.userId, p.currency), dir: 'C', cents: p.split.depositCents },
+        { account: ACC.available(p.userId, p.currency), dir: 'C', cents: p.split.winningsCents },
+      ],
+    });
+  }
+
+  /** Çekim talebi: tutar kullanıcının bakiyesinden çekim emanetine alınır (ödül bakiyesi önce). */
+  async requestPayout(q: Queryable, p: { withdrawalId: string; userId: string; split: WalletSplit; currency: string }): Promise<void> {
+    await this.post(q, {
+      key: `withdrawal:${p.withdrawalId}:request`,
+      reason: 'PAYOUT_REQUEST',
+      currency: p.currency,
+      refType: 'withdrawal',
+      refId: p.withdrawalId,
+      lines: [
+        { account: ACC.available(p.userId, p.currency), dir: 'D', cents: p.split.winningsCents },
+        { account: ACC.wallet(p.userId, p.currency), dir: 'D', cents: p.split.depositCents },
+        { account: ACC.payoutsPending(p.currency), dir: 'C', cents: p.split.depositCents + p.split.winningsCents },
+      ],
+    });
+  }
+
+  /** Çekim ödendi: para platformun banka hesabından elle gönderildi (komisyonu banka/sağlayıcı alır). */
+  async completePayout(q: Queryable, p: { withdrawalId: string; cents: number; currency: string }): Promise<void> {
+    await this.post(q, {
+      key: `withdrawal:${p.withdrawalId}:paid`,
+      reason: 'PAYOUT',
+      currency: p.currency,
+      refType: 'withdrawal',
+      refId: p.withdrawalId,
+      lines: [
+        { account: ACC.payoutsPending(p.currency), dir: 'D', cents: p.cents },
+        { account: ACC.payoutsSent(p.currency), dir: 'C', cents: p.cents },
+      ],
+    });
+  }
+
+  /** Çekim reddedildi ya da iptal edildi: tutar geldiği hesaplara geri döner. */
+  async returnPayout(q: Queryable, p: { withdrawalId: string; userId: string; split: WalletSplit; currency: string }): Promise<void> {
+    await this.post(q, {
+      key: `withdrawal:${p.withdrawalId}:returned`,
+      reason: 'PAYOUT_REVERSAL',
+      currency: p.currency,
+      refType: 'withdrawal',
+      refId: p.withdrawalId,
+      lines: [
+        { account: ACC.payoutsPending(p.currency), dir: 'D', cents: p.split.depositCents + p.split.winningsCents },
+        { account: ACC.available(p.userId, p.currency), dir: 'C', cents: p.split.winningsCents },
+        { account: ACC.wallet(p.userId, p.currency), dir: 'C', cents: p.split.depositCents },
+      ],
+    });
+  }
+
   // ---- okuma -----------------------------------------------------------------
 
   async balance(q: Queryable, code: string): Promise<number> {
@@ -254,16 +381,18 @@ export class LedgerService {
     return r.rows[0]?.balance_cents ?? 0;
   }
 
-  async userBalances(userId: string): Promise<{ currency: string; pendingCents: number; availableCents: number }[]> {
+  async userBalances(userId: string): Promise<{ currency: string; pendingCents: number; availableCents: number; depositCents: number; totalCents: number }[]> {
     const r = await this.pool.query<{ code: string; currency: string; balance_cents: number }>(
       `SELECT code, currency, balance_cents FROM ledger_balances WHERE owner_user = $1`,
       [userId],
     );
-    const byCur = new Map<string, { currency: string; pendingCents: number; availableCents: number }>();
+    const byCur = new Map<string, { currency: string; pendingCents: number; availableCents: number; depositCents: number; totalCents: number }>();
     for (const row of r.rows) {
-      const b = byCur.get(row.currency) ?? { currency: row.currency, pendingCents: 0, availableCents: 0 };
+      const b = byCur.get(row.currency) ?? { currency: row.currency, pendingCents: 0, availableCents: 0, depositCents: 0, totalCents: 0 };
       if (row.code.startsWith('USER_PRIZE_PENDING:')) b.pendingCents += row.balance_cents;
       if (row.code.startsWith('USER_PRIZE_AVAILABLE:')) b.availableCents += row.balance_cents;
+      if (row.code.startsWith('USER_WALLET:')) b.depositCents += row.balance_cents;
+      b.totalCents = b.availableCents + b.depositCents;
       byCur.set(row.currency, b);
     }
     return [...byCur.values()];
@@ -280,7 +409,7 @@ export class LedgerService {
       at: x.created_at,
       reason: x.reason,
       ref: { type: x.ref_type, id: x.ref_id },
-      bucket: x.code.startsWith('USER_PRIZE_PENDING:') ? 'pending' : 'available',
+      bucket: x.code.startsWith('USER_PRIZE_PENDING:') ? 'pending' : x.code.startsWith('USER_WALLET:') ? 'deposit' : 'available',
       cents: x.direction === 'C' ? x.amount_cents : -x.amount_cents,
       currency: x.currency,
     }));

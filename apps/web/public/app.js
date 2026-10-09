@@ -6,6 +6,12 @@
 
   // ---- küçük yardımcılar ------------------------------------------------------
 
+  // Koşullu öğeler (cond ? x : null) sayfada "null" yazısı olarak görünmesin.
+  const nativeReplace = Element.prototype.replaceChildren;
+  Element.prototype.replaceChildren = function (...nodes) {
+    return nativeReplace.apply(this, nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false));
+  };
+
   /** Güvenli DOM oluşturucu: metin her zaman textContent ile yazılır (XSS yok). */
   function el(tag, props = {}, ...children) {
     const node = document.createElement(tag);
@@ -58,11 +64,35 @@
   };
   const PAY_FAIL = { card_declined: 'Kart reddedildi', insufficient_funds: 'Yetersiz bakiye', authentication_failed: '3D Secure doğrulanamadı' };
 
-  /** Ücretli turnuvaya katıl: koltuk 10 dk ayrılır ve ödeme sağlayıcısının sayfasına gidilir. */
-  async function joinTournament(t) {
-    if (t.entryFeeCents > 0 && !confirm(`${t.name}\nGiriş ücreti ${money(t.entryFeeCents, t.currency)}. Koltuğun 10 dakika ayrılacak ve ödeme sayfasına yönlendirileceksin. Devam edilsin mi?`)) return;
+  /** Kullanıcının harcanabilir bakiyesi (yüklenen + çekilebilir ödül), cent. */
+  async function spendableCents(cur) {
     try {
-      const r = await api('POST', `/v1/tournaments/${t.id}/join`, {});
+      const r = await api('GET', '/v1/me/balance');
+      const b = r.balances.find((x) => x.currency === (cur || 'USD'));
+      return b ? b.totalCents : 0;
+    } catch { return 0; }
+  }
+
+  /**
+   * Ücretli turnuvaya katıl. Bakiye yeterliyse ücret bakiyeden düşülür ve koltuk hemen onaylanır;
+   * yetersizse koltuk 10 dk ayrılır ve kartla ödeme sayfasına gidilir.
+   */
+  async function joinTournament(t) {
+    let useWallet;
+    if (t.entryFeeCents > 0) {
+      const have = await spendableCents(t.currency);
+      if (have >= t.entryFeeCents) {
+        if (!confirm(`${t.name}\nGiriş ücreti ${money(t.entryFeeCents, t.currency)} bakiyenden düşülecek (bakiyen: ${money(have, t.currency)}). Katılmak istiyor musun?`)) return;
+        useWallet = true;
+      } else {
+        const msg = `${t.name}\nGiriş ücreti ${money(t.entryFeeCents, t.currency)}. Bakiyen yetersiz (${money(have, t.currency)}).\n\nTamam: kartla öde (koltuğun 10 dakika ayrılır).\nİptal: vazgeç ya da önce Cüzdan'dan bakiye yükle.`;
+        if (!confirm(msg)) return;
+        useWallet = false;
+      }
+    }
+    try {
+      const r = await api('POST', `/v1/tournaments/${t.id}/join`, useWallet === undefined ? {} : { useWallet });
+      if (r.paidFrom === 'wallet') toast(`Kaydın tamam: ${money(t.entryFeeCents, t.currency)} bakiyenden düşüldü.`);
       if (r.status === 'RESERVED') {
         if (r.checkoutUrl) location.href = r.checkoutUrl;
         else { toast('Koltuğun ayrıldı fakat ödeme sayfası açılamadı. Turnuva sayfasından tekrar dene.'); location.hash = `#/turnuva/${t.id}`; }
@@ -244,7 +274,13 @@
       if (m.matchId && !matchTournament.has(m.matchId)) matchTournament.set(m.matchId, null);
       if (!location.hash.startsWith(`#/oyun/${m.gameId}`)) location.hash = `#/oyun/${m.gameId}`;
     } else if (m.type === 'payment.confirmed') {
-      toast('Ödemen alındı, koltuğun onaylandı.', { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuvaya git' });
+      if (!m.fromWallet) toast('Ödemen alındı, koltuğun onaylandı.', { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuvaya git' });
+    } else if (m.type === 'wallet.deposited') {
+      toast(`${money(m.amountCents, 'USD')} bakiyene yüklendi.`, { href: '#/cuzdan', text: 'Cüzdan' });
+    } else if (m.type === 'withdrawal.paid') {
+      toast('Para çekme talebin ödendi.', { href: '#/cuzdan', text: 'Cüzdan' });
+    } else if (m.type === 'withdrawal.rejected') {
+      toast('Para çekme talebin reddedildi; tutar bakiyene geri döndü.', { href: '#/cuzdan', text: 'Cüzdan' });
     } else if (m.type === 'payment.orphaned') {
       toast(`${ORPHAN_REASON[m.reason] || 'Ödemen koltuğa bağlanamadı'}. Ücretin otomatik olarak iade ediliyor.`, { href: '#/cuzdan', text: 'Cüzdan' });
     } else if (m.type === 'payment.failed') {
@@ -266,13 +302,13 @@
   function renderNav() {
     const nav = document.getElementById('nav');
     if (session.user) {
-      nav.replaceChildren(
+      nav.replaceChildren(...[
         el('a', { href: '#/' }, 'Lobi'),
         el('a', { href: '#/cuzdan', id: 'nav-wallet' }, 'Cüzdan'),
         isStaff() ? el('a', { href: '#/yonetim', id: 'nav-admin' }, 'Yönetim') : null,
         el('span', { class: 'who' }, session.user.displayName),
         el('button', { class: 'btn', type: 'button', onclick: logout }, 'Çıkış'),
-      );
+      ].filter(Boolean));
     } else {
       nav.replaceChildren(el('a', { class: 'btn', href: '#/giris' }, 'Giriş'), el('a', { class: 'btn primary', href: '#/kayit' }, 'Kayıt ol'));
     }
@@ -943,18 +979,122 @@
     const root = el('div', { class: 'col' }, el('p', { class: 'muted' }, 'Yükleniyor…'));
     mount(root);
     const PAY_STATUS = { CREATED: 'bekliyor', SUCCEEDED: 'ödendi', FAILED: 'başarısız', REFUNDED: 'iade edildi', DISPUTED: 'itiraz', CANCELED: 'iptal' };
-    const REASONS = { ENTRY_PAID: 'Giriş', TOURNAMENT_SETTLE: 'Ödül (bekletmede)', PRIZE_RELEASE: 'Ödül serbest', PRIZE_VOID: 'Ödül iptali', PAYOUT: 'Çekim', PAYOUT_REVERSAL: 'Çekim iadesi', ADJUSTMENT: 'Düzeltme' };
+    const REASONS = {
+      ENTRY_PAID: 'Giriş', TOURNAMENT_SETTLE: 'Ödül (bekletmede)', PRIZE_RELEASE: 'Ödül serbest', PRIZE_VOID: 'Ödül iptali',
+      PAYOUT: 'Çekim', PAYOUT_REQUEST: 'Çekim talebi', PAYOUT_REVERSAL: 'Çekim iadesi', ADJUSTMENT: 'Düzeltme',
+      DEPOSIT: 'Bakiye yükleme', WALLET_ENTRY: 'Turnuva girişi', WALLET_REFUND: 'Giriş iadesi',
+    };
+    const BUCKET = { pending: 'bekletme', available: 'kazanç', deposit: 'yüklenen' };
+    const W_STATUS = { REQUESTED: ['inceleniyor', ''], PAID: ['ödendi', 'live'], REJECTED: ['reddedildi', 'warn'], CANCELED: ['iptal', 'done'] };
+    const METHOD = { ewallet: 'E-cüzdan', bank: 'Banka havalesi' };
+    const params = new URLSearchParams((location.hash.split('?')[1]) || '');
+    if (params.get('odeme')) {
+      void api('GET', `/v1/payments/${params.get('odeme')}`).then((p) => {
+        if (p.status === 'SUCCEEDED') toast('Ödeme alındı; bakiyen güncellendi.');
+        else if (p.status === 'CREATED') toast('Ödeme onayı bekleniyor; birkaç saniye içinde bakiyene yansır.');
+        else if (p.status === 'FAILED') toast(`Ödeme başarısız: ${PAY_FAIL[p.failureReason] || p.failureReason || ''}`);
+      }).catch(() => undefined);
+    }
+
+    function payoutForm({ closure, rules, total, cur }) {
+      const amount = el('input', { type: 'number', min: closure ? 0 : rules.minWithdrawCents / 100, step: '0.01', id: closure ? 'close-amount' : 'wd-amount', value: closure ? (total / 100).toFixed(2) : '', disabled: closure, inputmode: 'decimal' });
+      const method = el('select', { id: closure ? 'close-method' : 'wd-method' }, el('option', { value: 'ewallet' }, 'E-cüzdan'), el('option', { value: 'bank' }, 'Banka havalesi'));
+      const dest = el('input', { type: 'text', id: closure ? 'close-dest' : 'wd-dest', maxlength: 120, placeholder: 'E-cüzdan e-postası / hesap no' });
+      const holder = el('input', { type: 'text', id: closure ? 'close-holder' : 'wd-holder', maxlength: 80, placeholder: 'Ad Soyad', value: '' });
+      const preview = el('p', { class: 'small', id: closure ? 'close-preview' : 'wd-preview' });
+      async function quote() {
+        const cents = closure ? total : Math.round(Number(amount.value) * 100);
+        dest.placeholder = method.value === 'bank' ? 'IBAN' : 'E-cüzdan e-postası / hesap no';
+        if (!cents) { preview.textContent = ''; return; }
+        const q = await api('GET', `/v1/me/wallet/quote?amountCents=${cents}&method=${method.value}`);
+        preview.replaceChildren(
+          el('span', {}, `Çekilen: ${money(q.amountCents, cur)} · tahmini komisyon: ${money(q.feeCents, cur)} · hesabına geçecek: `),
+          el('b', {}, money(q.netCents, cur)),
+        );
+      }
+      amount.addEventListener('input', () => void quote());
+      method.addEventListener('change', () => void quote());
+      const form = el('form', { class: 'stack', id: closure ? 'close-form' : 'withdraw-form' },
+        closure ? null : el('label', { class: 'field' }, el('span', {}, `Tutar (en az ${money(rules.minWithdrawCents, cur)})`), amount),
+        el('label', { class: 'field' }, el('span', {}, 'Yöntem'), method),
+        el('label', { class: 'field' }, el('span', {}, 'Hesap bilgisi'), dest),
+        el('label', { class: 'field' }, el('span', {}, 'Hesap sahibinin adı'), holder),
+        preview,
+        el('p', { class: 'msg info small', id: closure ? 'close-notice' : 'withdraw-notice' }, rules.notice.tr),
+        el('button', { class: `btn ${closure ? 'danger' : 'primary'}`, type: 'submit' }, closure ? 'Hesabımı kapat ve bakiyemi çek' : 'Çekim talebi gönder'),
+      );
+      if (closure) void quote();
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const cents = closure ? total : Math.round(Number(amount.value) * 100);
+        const sure = closure
+          ? confirm(`Hesabın kapatılacak${total ? ` ve ${money(total, cur)} bakiyenin tamamı çekilecek` : ''}. Bu işlem geri alınamaz. Devam edilsin mi?`)
+          : confirm(`${money(cents, cur)} çekim talebi gönderilsin mi? Komisyon çekilen tutardan düşülür.`);
+        if (!sure) return;
+        try {
+          if (closure) {
+            const r = await api('POST', '/v1/me/close-account', { method: method.value, destination: dest.value || undefined, holderName: holder.value || undefined });
+            if (r.closed) { toast('Hesabın kapatıldı.'); await logout(); return; }
+            toast('Hesap kapatma talebin alındı. Bakiyen gönderilince hesabın kapanacak.');
+          } else {
+            await api('POST', '/v1/me/withdrawals', { amountCents: cents, method: method.value, destination: dest.value, holderName: holder.value });
+            toast('Çekim talebin alındı. Ödeme yapılınca bildirim alacaksın.');
+          }
+          await load();
+        } catch (e) { toast(e.message); }
+      });
+      return form;
+    }
+
     async function load() {
       const w = await api('GET', '/v1/me/wallet');
-      const bals = w.balances.length ? w.balances : [{ currency: 'USD', availableCents: 0, pendingCents: 0 }];
+      const bals = w.balances.length ? w.balances : [{ currency: 'USD', availableCents: 0, pendingCents: 0, depositCents: 0, totalCents: 0 }];
+      const usd = bals.find((b) => b.currency === 'USD') || bals[0];
+      const cur = usd.currency;
+      const rules = w.withdrawals.rules;
+      const openW = w.withdrawals.items.find((x) => x.status === 'REQUESTED');
+      const depositForm = el('form', { class: 'row', id: 'deposit-form' },
+        el('input', { type: 'number', id: 'deposit-amount', min: rules.minDepositCents / 100, max: rules.maxDepositCents / 100, step: '1', value: String(rules.minDepositCents / 100), inputmode: 'numeric', class: 'amount-input' }),
+        el('button', { class: 'btn primary', type: 'submit' }, 'Bakiye yükle'),
+      );
+      depositForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const cents = Math.round(Number(depositForm.querySelector('#deposit-amount').value) * 100);
+        try {
+          const r = await api('POST', '/v1/me/wallet/deposit', { amountCents: cents, key: `w${Date.now()}${Math.random().toString(36).slice(2, 8)}` });
+          if (r.checkoutUrl) location.href = r.checkoutUrl;
+        } catch (e) { toast(e.message); }
+      });
       const summary = el('section', { class: 'card', id: 'wallet-balance' }, el('h2', {}, 'Bakiye'),
-        el('div', { class: 'wallet-grid' }, bals.map((b) => [
-          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Çekilebilir'), el('b', { class: 'mono', dataset: { available: b.currency } }, money(b.availableCents, b.currency))),
-          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Bekletmede'), el('b', { class: 'mono', dataset: { pending: b.currency } }, money(b.pendingCents, b.currency))),
-        ])),
+        el('div', { class: 'stat big' }, el('span', { class: 'small muted' }, 'Toplam bakiye'), el('b', { class: 'mono', dataset: { total: cur } }, money(usd.totalCents, cur))),
+        el('div', { class: 'wallet-grid' },
+          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Yüklenen'), el('b', { class: 'mono', dataset: { deposit: cur } }, money(usd.depositCents, cur))),
+          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Kazanılan (çekilebilir)'), el('b', { class: 'mono', dataset: { available: cur } }, money(usd.availableCents, cur))),
+          el('div', { class: 'stat' }, el('span', { class: 'small muted' }, 'Bekletmede'), el('b', { class: 'mono', dataset: { pending: cur } }, money(usd.pendingCents, cur))),
+        ),
+        el('p', { class: 'small muted' }, `Bir kerede ${money(rules.minDepositCents, cur)}–${money(rules.maxDepositCents, cur)} yükleyebilirsin. Turnuva ücretleri bakiyenden düşülür.`),
+        depositForm,
         el('p', { class: 'small muted' }, 'Ödüller, hile incelemesi için tutara göre 12–48 saat bekletilir; sonra çekilebilir bakiyeye geçer.'),
-        el('button', { class: 'btn', type: 'button', disabled: true, title: 'Kimlik doğrulama (KYC) gerekli' }, 'Para çek'),
-        el('p', { class: 'small muted' }, 'Para çekme, kimlik doğrulaması (KYC) tamamlandığında açılır.'),
+      );
+      const withdraw = el('section', { class: 'card', id: 'withdraw-card' }, el('h2', {}, 'Para çek'),
+        openW
+          ? el('p', { class: 'msg info' }, `Bekleyen talebin var: ${money(openW.amountCents, openW.currency)} (${METHOD[openW.method]}). Sonuçlanınca yeni talep verebilirsin.`)
+          : usd.totalCents >= rules.minWithdrawCents
+            ? payoutForm({ closure: false, rules, total: usd.totalCents, cur })
+            : el('p', { class: 'small muted' }, `En az çekim tutarı ${money(rules.minWithdrawCents, cur)}. Hesabını kapatırsan tutar ne olursa olsun bakiyenin tamamını çekebilirsin.`),
+        w.withdrawals.items.length ? el('ul', { class: 'entrants', id: 'withdrawal-list' }, w.withdrawals.items.map((x) => el('li', {},
+          el('span', {}, `${METHOD[x.method]} · ${x.destinationHint}`, el('span', { class: 'small muted' }, ` · ${fmtTime(x.createdAt)}${x.accountClosure ? ' · hesap kapatma' : ''}${x.note ? ` · ${x.note}` : ''}`)),
+          el('span', {}, el('b', { class: 'mono' }, money(x.amountCents, x.currency)), el('span', { class: 'small muted' }, ` (net ${money(x.netCents, x.currency)}) `),
+            el('span', { class: `pill ${W_STATUS[x.status][1]}` }, W_STATUS[x.status][0]),
+            x.status === 'REQUESTED' ? el('button', { class: 'btn small', type: 'button', onclick: async () => {
+              if (!confirm('Talep iptal edilsin mi? Tutar bakiyene geri döner.')) return;
+              try { await api('POST', `/v1/me/withdrawals/${x.id}/cancel`); await load(); } catch (e) { toast(e.message); }
+            } }, 'İptal') : null),
+        ))) : null,
+      );
+      const closeCard = el('details', { class: 'card', id: 'close-account' }, el('summary', {}, 'Hesabı kapat'),
+        el('p', { class: 'small' }, 'Hesabını kapatırsan, 20 $ altında olsa bile bakiyenin tamamı sana gönderilir ve hesabın kapanır. Devam eden turnuvan veya incelemedeki ödülün varsa önce onların bitmesi gerekir.'),
+        openW ? el('p', { class: 'small muted' }, 'Bekleyen bir çekim talebin var; önce onun sonuçlanmasını bekle ya da iptal et.') : payoutForm({ closure: true, rules, total: usd.totalCents, cur }),
       );
       const awards = el('section', { class: 'card' }, el('h2', {}, 'Ödüller'),
         w.awards.length ? el('ul', { class: 'entrants' }, w.awards.map((a) => el('li', {},
@@ -966,7 +1106,7 @@
       );
       const pays = el('section', { class: 'card' }, el('h2', {}, 'Ödemeler'),
         w.payments.length ? el('ul', { class: 'entrants', id: 'payment-list' }, w.payments.map((p) => el('li', {},
-          el('span', {}, p.tournamentName ? el('a', { href: `#/turnuva/${p.tournamentId}` }, p.tournamentName) : 'Ödeme', el('span', { class: 'small muted' }, ` · ${fmtTime(p.createdAt)}${p.cardLast4 ? ` · •••• ${p.cardLast4}` : ''}`)),
+          el('span', {}, p.tournamentName ? el('a', { href: `#/turnuva/${p.tournamentId}` }, p.tournamentName) : p.purpose === 'deposit' ? 'Bakiye yükleme' : 'Ödeme', el('span', { class: 'small muted' }, ` · ${fmtTime(p.createdAt)}${p.cardLast4 ? ` · •••• ${p.cardLast4}` : ''}`)),
           el('span', {}, el('b', { class: 'mono' }, money(p.amountCents, p.currency)), ' ',
             el('span', { class: `pill ${p.status === 'SUCCEEDED' ? 'live' : p.status === 'REFUNDED' ? 'done' : p.status === 'FAILED' || p.status === 'DISPUTED' ? 'warn' : ''}` },
               p.refundStatus === 'PENDING' ? 'iade ediliyor' : PAY_STATUS[p.status] || p.status)),
@@ -974,19 +1114,19 @@
       );
       const hist = el('section', { class: 'card' }, el('h2', {}, 'Hareketler'),
         w.history.length ? el('ul', { class: 'entrants' }, w.history.map((h) => el('li', {},
-          el('span', {}, h.reason === 'PRIZE_RELEASE' && h.bucket === 'pending' ? 'Bekletmeden çıktı' : REASONS[h.reason] || h.reason, el('span', { class: 'small muted' }, ` · ${fmtTime(h.at)} · ${h.bucket === 'pending' ? 'bekletme' : 'çekilebilir'}`)),
+          el('span', {}, h.reason === 'PRIZE_RELEASE' && h.bucket === 'pending' ? 'Bekletmeden çıktı' : REASONS[h.reason] || h.reason, el('span', { class: 'small muted' }, ` · ${fmtTime(h.at)} · ${BUCKET[h.bucket] || h.bucket}`)),
           el('b', { class: `mono ${h.cents < 0 ? 'neg' : 'pos'}` }, `${h.cents > 0 ? '+' : ''}${money(h.cents, h.currency)}`),
         ))) : el('p', { class: 'muted small' }, 'Hareket yok.'),
       );
       root.replaceChildren(
         el('header', {}, el('p', { class: 'eyebrow' }, 'Hesap'), el('h1', {}, 'Cüzdan')),
-        el('div', { class: 'grid2' }, el('div', { class: 'col' }, summary, pays), el('div', { class: 'col' }, awards, hist)),
+        el('div', { class: 'grid2' }, el('div', { class: 'col' }, summary, withdraw, pays), el('div', { class: 'col' }, awards, hist, closeCard)),
       );
     }
     await load();
     let t = null;
     const off = ws.on((m) => {
-      if (/^(payment|prize)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
+      if (/^(payment|prize|wallet|withdrawal)\./.test(m.type)) { clearTimeout(t); t = setTimeout(() => void load().catch(() => undefined), 300); }
     });
     return () => { off(); clearTimeout(t); };
   }
@@ -1028,7 +1168,7 @@
 
   async function adminView(tab, sub, params) {
     if (!session.user) { location.hash = '#/giris'; return null; }
-    const tabs = [['genel', 'Genel'], ['vakalar', 'Vakalar'], ['onaylar', 'Onaylar'], ['finans', 'Finans'], ['turnuvalar', 'Turnuvalar'], ['kullanicilar', 'Kullanıcılar'], ['bayraklar', 'Bayraklar'], ['denetim', 'Denetim']];
+    const tabs = [['genel', 'Genel'], ['vakalar', 'Vakalar'], ['onaylar', 'Onaylar'], ['cekimler', 'Çekimler'], ['finans', 'Finans'], ['turnuvalar', 'Turnuvalar'], ['kullanicilar', 'Kullanıcılar'], ['bayraklar', 'Bayraklar'], ['denetim', 'Denetim']];
     const body = el('div', { class: 'col', id: 'admin-body' }, el('p', { class: 'muted' }, 'Yükleniyor…'));
     mount(
       el('header', {}, el('p', { class: 'eyebrow' }, 'Yönetim'), el('h1', {}, 'Kontrol paneli')),
@@ -1076,12 +1216,12 @@
             el('h3', { class: 'h3' }, 'Sebepler'),
             el('ul', { class: 'reasons' }, (c.reasons || []).map((r) => el('li', {}, r.reason))),
             el('h3', { class: 'h3' }, 'Oyun analizleri'),
-            table(['Oyun', 'Motor', 'Analiz edilen', 'ACPL', 'Top-1', 'Karmaşık top-1', 'Ritim (CV)'], d.analyses.map((a) => {
+            table(['Oyun', 'Derinlik', 'Analiz edilen', 'ACPL', 'Top-1', 'Karmaşık top-1', 'Ritim (CV)'], d.analyses.map((a) => {
               const p = a.summary.players.white.userId === c.user_id ? a.summary.players.white : a.summary.players.black;
-              return [el('a', { href: `#/oyun/${a.game_id}` }, a.game_id.slice(0, 8)), `${a.engine} d${a.depth}`, p.analysedMoves, p.acpl ?? '—', p.top1 ?? '—', p.complexTop1 ?? '—', p.thinkCv ?? '—'];
+              return [el('a', { href: `#/oyun/${a.game_id}` }, a.game_id.slice(0, 8)), `d${a.depth}`, p.analysedMoves, p.acpl ?? '—', p.top1 ?? '—', p.complexTop1 ?? '—', p.thinkCv ?? '—'];
             })),
             el('h3', { class: 'h3' }, 'Risk skorları'),
-            table(['Oyun', 'Skor', 'Motor', 'Zaman', 'Odak', 'Bağlantı', 'Davranış'], d.riskScores.map((r) => [r.game_id.slice(0, 8), Number(r.score).toFixed(2), r.components.engine, r.components.time, r.components.focus, r.components.link, r.components.behav])),
+            table(['Oyun', 'Skor', 'Motor benzerliği', 'Zaman', 'Odak', 'Bağlantı', 'Davranış'], d.riskScores.map((r) => [r.game_id.slice(0, 8), Number(r.score).toFixed(2), r.components.engine, r.components.time, r.components.focus, r.components.link, r.components.behav])),
             el('p', { class: 'small muted' }, 'Skor tek başına delil değildir; karar çoklu oyun ve göstergeye, insan incelemesine dayanır (doküman 14.4).'),
             open && !proposed ? el('div', { class: 'row' },
               el('button', { class: 'btn', type: 'button', id: 'propose-clear', onclick: () => { const r = askReason('Vaka TEMİZ kapatılacak; ödül serbest kalacak.'); if (r) void adminAct(() => api('POST', `/v1/admin/cases/${sub}/propose`, { decision: 'clear', reason: r })); } }, 'Temize çıkar (öner)'),
@@ -1116,6 +1256,29 @@
                 el('button', { class: 'btn', type: 'button', onclick: () => void adminAct(() => api('POST', `/v1/admin/approvals/${a.id}/reject`, { note: prompt('Red notu') || '' }), 'Reddedildi.') }, 'Reddet')),
           ]), 'approvals-table'),
           el('a', { href: '#/yonetim/onaylar?durum=ALL', class: 'small' }, 'Geçmiş talepler'),
+        ));
+      } else if (tab === 'cekimler') {
+        const st = params.get('durum') || 'REQUESTED';
+        const d = await api('GET', `/v1/admin/withdrawals${st === 'ALL' ? '' : `?status=${st}`}`);
+        const METHOD = { ewallet: 'E-cüzdan', bank: 'Banka' };
+        body.replaceChildren(el('section', { class: 'card' },
+          el('div', { class: 'spread' }, el('h2', {}, 'Para çekme talepleri'),
+            el('div', { class: 'row' }, ['REQUESTED', 'PAID', 'REJECTED', 'ALL'].map((x) => el('a', { class: `btn ${x === st ? 'primary' : ''}`, href: `#/yonetim/cekimler?durum=${x}` }, { REQUESTED: 'Bekleyen', PAID: 'Ödenen', REJECTED: 'Reddedilen', ALL: 'Tümü' }[x])))),
+          el('p', { class: 'small muted' }, 'Parayı platform hesabından gönderdikten sonra "Ödendi" ile dekont/işlem numarasını gir. Hesap sahibinin adı kullanıcıyla uyuşmuyorsa reddet; tutar bakiyesine geri döner.'),
+          table(['Oyuncu', 'Tutar', 'Komisyon', 'Net', 'Yöntem', 'Hesap', 'Ad', 'Tarih', 'Durum', ''], d.withdrawals.map((w) => [
+            `${w.user.displayName}${w.accountClosure ? ' (kapatma)' : ''}`, money(w.amountCents, w.currency), money(w.feeCents, w.currency), money(w.netCents, w.currency),
+            METHOD[w.method], el('span', { class: 'mono small' }, w.destination), w.holderName, fmtTime(w.createdAt), w.status + (w.payoutRef ? ` · ${w.payoutRef}` : ''),
+            w.status === 'REQUESTED' ? el('div', { class: 'row' },
+              el('button', { class: 'btn small primary', type: 'button', onclick: () => {
+                const ref = prompt(`${money(w.netCents, w.currency)} gönderildi mi?\nDekont / işlem numarası:`);
+                if (ref && ref.trim().length >= 3) void adminAct(() => api('POST', `/v1/admin/withdrawals/${w.id}/paid`, { payoutRef: ref.trim() }), 'Ödendi olarak işaretlendi.');
+              } }, 'Ödendi'),
+              el('button', { class: 'btn small danger', type: 'button', onclick: () => {
+                const r = askReason('Talep reddedilecek; tutar oyuncunun bakiyesine döner.');
+                if (r) void adminAct(() => api('POST', `/v1/admin/withdrawals/${w.id}/reject`, { reason: r }), 'Reddedildi.');
+              } }, 'Reddet'),
+            ) : '',
+          ]), 'withdrawals-table'),
         ));
       } else if (tab === 'finans') {
         const d = await api('GET', '/v1/admin/finance');

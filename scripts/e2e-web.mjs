@@ -195,6 +195,33 @@ try {
   const rep = await env.app.payments.reconcile('USD');
   check(inv.balanced && inv.negativeUserBalances === 0 && rep.ok, `Defter dengeli ve mutabakat farkı 0 (${rep.diffCents})`);
 
+  // ---- 4b. Cüzdan: bakiye yükleme, para çekme talebi (komisyon önizlemesi) ----
+  await page.fill('#deposit-amount', '20');
+  await page.click('#deposit-form button[type=submit]');
+  await page.waitForURL(/\/sandbox-psp\/checkout\//);
+  await page.waitForSelector('#pay-form:not(.hidden)');
+  check((await page.textContent('#amount')).includes('20,00'), 'Bakiye yükleme: ödeme sayfasında 20,00 $');
+  await page.fill('#card', '4242424242424242');
+  await page.fill('#exp', '1239');
+  await page.fill('#cvc', '123');
+  await page.click('#pay-btn');
+  await page.waitForURL(/#\/cuzdan/, { timeout: 10_000 });
+  await page.waitForFunction(() => document.querySelector('[data-total="USD"]')?.textContent.includes('38,00'), null, { timeout: 20_000 });
+  check(true, 'Bakiye yüklendi: toplam 38,00 $ (18 kazanç + 20 yüklenen)');
+  await page.fill('#wd-amount', '20');
+  await page.fill('#wd-dest', 'kanan@ornek.test');
+  await page.fill('#wd-holder', 'Kanan Test');
+  await page.waitForFunction(() => document.querySelector('#wd-preview')?.textContent.includes('18,80'), null, { timeout: 5_000 });
+  check((await page.textContent('#wd-preview')).includes('1,20'), 'Para çekme: komisyon (1,20 $) ve net tutar (18,80 $) önceden gösteriliyor');
+  check((await page.textContent('#withdraw-notice')).includes('platformumuza ait değildir'), 'Para çekme: komisyon uyarı metni görünüyor');
+  page.once('dialog', (dlg) => void dlg.accept());
+  await page.click('#withdraw-form button[type=submit]');
+  await page.waitForSelector('#withdrawal-list li');
+  check((await page.textContent('#withdrawal-list')).includes('inceleniyor'), 'Çekim talebi listede "inceleniyor"');
+  await page.waitForFunction(() => document.querySelector('[data-total="USD"]')?.textContent.includes('18,00'), null, { timeout: 5_000 });
+  check(true, 'Talep edilen 20 $ bakiyeden ayrıldı (kalan 18,00 $)');
+  if (shots) await page.screenshot({ path: join(shots, 'web-cuzdan-cekim.png'), fullPage: true });
+
   // ---- 5. Yönetim paneli: dört göz onayı tarayıcıdan ----
   await env.app.pool.query(`UPDATE users SET roles = '{player,admin}' WHERE id = $1`, [userId]);
   const { newPlayer } = await import(join(root, 'packages/server/test/helpers.ts'));
@@ -217,6 +244,18 @@ try {
   const vst = (await env.app.pool.query('SELECT status FROM users WHERE id = $1', [victim.id])).rows[0].status;
   check(vst === 'banned', 'Dört göz: başka yöneticinin önerisi tarayıcıdan onaylandı, hesap kapatıldı');
   if (shots) await page.screenshot({ path: join(shots, 'web-onaylar.png'), fullPage: true });
+  await page.goto(env.base + '/#/yonetim/cekimler');
+  await page.waitForSelector('#withdrawals-table');
+  check((await page.textContent('#withdrawals-table')).includes('kanan@ornek.test'), 'Yönetim: çekim talebi tam hesap bilgisiyle listede');
+  page.once('dialog', (dlg) => void dlg.accept('DEKONT-E2E-1'));
+  await page.click('#withdrawals-table button.primary');
+  let wst;
+  for (let i = 0; i < 50; i++) {
+    wst = (await env.app.pool.query(`SELECT status, payout_ref FROM withdrawals WHERE user_id = $1`, [userId])).rows[0];
+    if (wst.status !== 'REQUESTED') break;
+    await sleep(200);
+  }
+  check(wst.status === 'PAID' && wst.payout_ref === 'DEKONT-E2E-1', 'Yönetim: "Ödendi" işaretlendi, dekont numarası kaydedildi');
   await page.goto(env.base + '/#/yonetim/finans');
   await page.waitForSelector('#accounts-table');
   check((await page.textContent('#admin-body')).includes('Defter dengeli'), 'Finans ekranı: defter dengeli, hesap tablosu');

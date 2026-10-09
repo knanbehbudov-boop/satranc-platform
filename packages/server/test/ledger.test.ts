@@ -194,10 +194,10 @@ describe('M8 defter: turnuva akışı', () => {
     await L.settleTournament(pool, { tournamentId: tid, currency: 'USD', rakeCents: split.rakeCents, awards });
     assert.equal(await L.balance(pool, ACC.pool(tid).code), 0, 'emanet sıfırlandı');
     const champ = players[0]?.id as string;
-    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 5600, availableCents: 0 }]);
+    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 5600, availableCents: 0, depositCents: 0, totalCents: 0 }]);
     await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 5600, currency: 'USD' });
     await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 5600, currency: 'USD' }); // tekrar: etkisiz
-    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 0, availableCents: 5600 }]);
+    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 0, availableCents: 5600, depositCents: 0, totalCents: 5600 }]);
     const inv = await L.invariants();
     assert.equal(inv.balanced, true);
     assert.equal(inv.negativeUserBalances, 0);

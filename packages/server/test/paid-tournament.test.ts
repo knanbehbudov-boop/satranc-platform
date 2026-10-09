@@ -252,7 +252,8 @@ describe('ücretli turnuva sonu: hesaplaşma, bekletme, cüzdan', () => {
     assert.equal(usd.pendingCents, 0);
     assert.equal(w.body.awards[0].status, 'RELEASED');
     assert.equal(w.body.payments[0].status, 'SUCCEEDED');
-    assert.equal(w.body.withdrawals.available, false);
+    assert.equal(w.body.withdrawals.available, true);
+    assert.equal(w.body.withdrawals.rules.minWithdrawCents, 2000);
     const events = await q<{ to_status: string }>('SELECT to_status FROM tournament_events WHERE tournament_id = $1 ORDER BY id', [id]);
     assert.deepEqual(events.map((e) => e.to_status), ['DRAFT', 'OPEN', 'FULL', 'STARTING', 'RUNNING', 'FINISHED', 'SETTLING', 'SETTLED']);
     await assertLedgerHealthy();

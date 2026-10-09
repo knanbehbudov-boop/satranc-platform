@@ -186,3 +186,13 @@ label.check input { width: auto; margin-top: 3px; }
 .toast { background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 10px; font-size: 14px; display: grid; gap: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 .toast a { color: var(--sq-last); font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* K43 cüzdan */
+.stat.big { display: grid; gap: 2px; margin: 4px 0 12px; }
+.stat.big b { font-size: 32px; }
+.wallet-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 520px) { .wallet-grid { grid-template-columns: 1fr; } }
+.btn.small { padding: 4px 10px; font-size: 13px; }
+details.card > summary { cursor: pointer; font-weight: 600; }
+details.card[open] > summary { margin-bottom: 10px; }
+.amount-input { max-width: 120px; }

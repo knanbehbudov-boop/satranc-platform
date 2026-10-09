@@ -31,6 +31,7 @@ import type { PaymentProvider } from './modules/payments/provider.ts';
 import { SandboxPsp } from './modules/payments/sandbox.ts';
 import { PaymentService } from './modules/payments/service.ts';
 import { StripePsp } from './modules/payments/stripe.ts';
+import { WalletService, type PayoutMethod } from './modules/wallet/service.ts';
 import { RULES } from './infra/http/ratelimit.ts';
 import { notFound } from './infra/errors.ts';
 
@@ -50,6 +51,7 @@ export interface App {
   tournaments: TournamentService;
   ledger: LedgerService;
   payments: PaymentService;
+  wallet: WalletService;
   flags: FlagService;
   analysis: AnalysisService;
   fairplay: FairPlayService;
@@ -166,6 +168,61 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   router.get('/v1/payments/:id', async (ctx) => payments.getForUser(ctx.requireUser().id, ctx.params.id as string));
   router.get('/v1/me/payments', async (ctx) => ({ payments: await payments.listForUser(ctx.requireUser().id) }));
 
+  // ---- K43 cüzdan ve para çekme ----
+  const wallet = new WalletService({ pool, cfg, logger: logger.child({ part: 'wallet' }), hub, ledger, payments });
+  events.subscribe('wallet-notify', ['wallet.deposited'], async (ev, _tx, hooks) => {
+    const e = ev.payload as { userId: string; paymentId: string; amountCents: number };
+    hooks.afterCommit(() => hub.sendToUser(e.userId, { type: 'wallet.deposited', paymentId: e.paymentId, amountCents: e.amountCents }));
+  });
+  router.get('/v1/me/balance', async (ctx) => ({ balances: await ledger.userBalances(ctx.requireUser().id) }));
+  router.post('/v1/me/wallet/deposit', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`deposit:${u.id}`, RULES.join);
+    const b = parse({ amountCents: { type: 'int', min: 1, max: 10_000_000 }, key: { type: 'string', min: 8, max: 64, optional: true } }, ctx.body);
+    return wallet.deposit(u.id, b.amountCents, b.key ?? null);
+  });
+  router.get('/v1/me/wallet/quote', async (ctx) => {
+    ctx.requireUser();
+    const amount = Number(ctx.query.get('amountCents'));
+    const method = (ctx.query.get('method') === 'bank' ? 'bank' : 'ewallet') as PayoutMethod;
+    if (!Number.isSafeInteger(amount) || amount <= 0) return { ...wallet.quote(0, method), notice: wallet.rules().notice };
+    return { ...wallet.quote(amount, method), notice: wallet.rules().notice };
+  });
+  router.post('/v1/me/withdrawals', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`withdraw:${u.id}`, RULES.join);
+    const b = parse(
+      {
+        amountCents: { type: 'int', min: 1, max: 100_000_000 },
+        method: { type: 'string', pattern: /^(ewallet|bank)$/ },
+        destination: { type: 'string', min: 3, max: 120 },
+        holderName: { type: 'string', min: 2, max: 80 },
+      },
+      ctx.body,
+    );
+    ctx.status = 201;
+    const r = await wallet.requestWithdrawal(u.id, { amountCents: b.amountCents, method: b.method as PayoutMethod, destination: b.destination, holderName: b.holderName });
+    return r.withdrawal;
+  });
+  router.post('/v1/me/withdrawals/:id/cancel', async (ctx) => wallet.cancelWithdrawal(ctx.requireUser().id, ctx.params.id as string));
+  router.post('/v1/me/close-account', async (ctx) => {
+    const u = ctx.requireUser();
+    const b = parse(
+      {
+        method: { type: 'string', pattern: /^(ewallet|bank)$/, optional: true },
+        destination: { type: 'string', min: 3, max: 120, optional: true },
+        holderName: { type: 'string', min: 2, max: 80, optional: true },
+      },
+      ctx.body ?? {},
+    );
+    return wallet.requestWithdrawal(u.id, {
+      method: (b.method ?? 'ewallet') as PayoutMethod,
+      destination: b.destination ?? 'yok',
+      holderName: b.holderName ?? 'yok',
+      closeAccount: true,
+    });
+  });
+
   // ---- M5 turnuva ----
   const tournaments = new TournamentService({ pool, cfg, logger: logger.child({ part: 'tournament' }), hub, games, identity, ratings, payments, ledger, flags });
   events.subscribe('tournament', ['game.ended'], tournaments.onGameEnded);
@@ -193,7 +250,9 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   router.post('/v1/tournaments/:id/join', async (ctx) => {
     const u = ctx.requireUser();
     ctx.limit(`join:${u.id}`, RULES.join);
-    return tournaments.join(u.id, tid(ctx), { ip: ctx.ip, deviceKey: ctx.deviceKey });
+    const body = (ctx.body ?? {}) as { useWallet?: unknown };
+    const useWallet = typeof body.useWallet === 'boolean' ? body.useWallet : undefined;
+    return tournaments.join(u.id, tid(ctx), { ip: ctx.ip, deviceKey: ctx.deviceKey, ...(useWallet === undefined ? {} : { useWallet }) });
   });
   router.post('/v1/tournaments/:id/leave', async (ctx) => {
     const r = await tournaments.leave(ctx.requireUser().id, tid(ctx));
@@ -219,8 +278,8 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       })),
       payments: await payments.listForUser(u.id, 20),
       history: await ledger.userHistory(u.id, 50),
-      // Para çekme (payout) KYC ile birlikte açılır (doküman 5.4–5.5); bu sürümde yalnız bakiye görünür.
-      withdrawals: { available: false, reason: 'KYC_REQUIRED' },
+      // K43: para çekme talebi; ödeme yönetici tarafından yapılır ve işaretlenir.
+      withdrawals: { available: true, rules: wallet.rules(), items: await wallet.myWithdrawals(u.id) },
     };
   });
   router.post('/v1/tournaments/:id/ready', async (ctx) => {
@@ -230,7 +289,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
 
   // ---- M13 yönetim ----
   const admin = new AdminService({ pool, logger: logger.child({ part: 'admin' }), identity, tournaments, fairplay, analysis, payments, ledger, flags });
-  adminRoutes(router, { admin, fairplay, analysis, payments, tournaments, pool });
+  adminRoutes(router, { admin, fairplay, analysis, payments, tournaments, pool, wallet });
 
   // ---- arayüzün bilmesi gereken genel ayarlar ----
   router.get('/v1/config', () => ({
@@ -279,6 +338,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     tournaments,
     ledger,
     payments,
+    wallet,
     flags,
     analysis,
     fairplay,

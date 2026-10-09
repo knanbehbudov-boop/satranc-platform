@@ -24,6 +24,7 @@ export interface PaymentRow {
   user_id: string;
   tournament_id: string | null;
   entry_id: string | null;
+  purpose: 'entry' | 'deposit';
   provider: string;
   provider_ref: string | null;
   amount_cents: number;
@@ -53,6 +54,8 @@ export interface CreatePaymentInput {
   /** Turnuva koltuğu dışında bir ödeme için boş bırakılır (bu durumda turnuva modülü olayı yok sayar). */
   tournamentId: string | null;
   entryId: string | null;
+  /** 'deposit': bakiye yükleme (K43); varsayılan 'entry'. */
+  purpose?: 'entry' | 'deposit';
   amountCents: number;
   currency: string;
   /** Aynı anahtar aynı ödemeyi döndürür (çift tıklama, yeniden deneme). */
@@ -107,10 +110,10 @@ export class PaymentService {
    */
   async createPayment(input: CreatePaymentInput): Promise<{ paymentId: string; checkoutUrl: string | null; status: PaymentRow['status'] }> {
     const ins = await this.pool.query<PaymentRow>(
-      `INSERT INTO payments (user_id, tournament_id, entry_id, provider, amount_cents, currency, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO payments (user_id, tournament_id, entry_id, provider, amount_cents, currency, idempotency_key, purpose)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = payments.updated_at RETURNING *`,
-      [input.userId, input.tournamentId, input.entryId, this.provider.name, input.amountCents, input.currency, input.idempotencyKey],
+      [input.userId, input.tournamentId, input.entryId, this.provider.name, input.amountCents, input.currency, input.idempotencyKey, input.purpose ?? 'entry'],
     );
     const row = ins.rows[0] as PaymentRow;
     if (row.user_id !== input.userId) throw new AppError(409, 'IDEMPOTENCY_CONFLICT', 'Bu anahtar başka bir ödemeye ait');
@@ -121,7 +124,7 @@ export class PaymentService {
       amountCents: row.amount_cents,
       currency: row.currency,
       idempotencyKey: `payment:${row.id}`,
-      metadata: { paymentId: row.id, userId: input.userId, tournamentId: input.tournamentId ?? '', entryId: input.entryId ?? '', description: input.description },
+      metadata: { paymentId: row.id, userId: input.userId, tournamentId: input.tournamentId ?? '', entryId: input.entryId ?? '', purpose: row.purpose, description: input.description },
       returnUrl: input.returnUrl(row.id),
     });
     await this.pool.query(
@@ -149,6 +152,7 @@ export class PaymentService {
     const refund = await this.pool.query<{ status: string }>('SELECT status FROM refunds WHERE payment_id = $1', [p.id]);
     return {
       id: p.id,
+      purpose: p.purpose,
       status: p.status,
       amountCents: p.amount_cents,
       currency: p.currency,
@@ -170,6 +174,7 @@ export class PaymentService {
     );
     return r.rows.map((p) => ({
       id: p.id,
+      purpose: p.purpose,
       status: p.status,
       amountCents: p.amount_cents,
       currency: p.currency,
@@ -264,6 +269,12 @@ export class PaymentService {
         [p.id, { expected: p.amount_cents, got: cents, currency }],
       );
       await this.requestRefund(tx, { paymentId: p.id, source: 'orphan', reason: 'amount_mismatch', cents }, after);
+      return;
+    }
+    if (p.purpose === 'deposit') {
+      // K43: bakiye yükleme — para doğrudan kullanıcının cüzdanına.
+      await this.ledger.creditDeposit(tx, { paymentId: p.id, userId: p.user_id, cents, currency });
+      await publish(tx, 'wallet.deposited', { paymentId: p.id, userId: p.user_id, amountCents: cents, currency });
       return;
     }
     await publish(tx, 'payment.succeeded', {

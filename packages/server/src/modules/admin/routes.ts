@@ -11,14 +11,15 @@ import type { AnalysisService } from '../fairplay/analysis.ts';
 import type { FairPlayService } from '../fairplay/service.ts';
 import type { PaymentService } from '../payments/service.ts';
 import type { TournamentService } from '../tournament/service.ts';
+import type { WalletService } from '../wallet/service.ts';
 import { PLATFORM_RAKE_BPS, schemeFor } from '../ledger/prizes.ts';
 import type { Pool } from '../../infra/db/pg.ts';
 import type { AdminService, StaffRole } from './service.ts';
 
 export function adminRoutes(router: Router, d: {
-  admin: AdminService; fairplay: FairPlayService; analysis: AnalysisService; payments: PaymentService; tournaments: TournamentService; pool: Pool;
+  admin: AdminService; fairplay: FairPlayService; analysis: AnalysisService; payments: PaymentService; tournaments: TournamentService; pool: Pool; wallet: WalletService;
 }): void {
-  const { admin, fairplay, analysis, payments, tournaments, pool } = d;
+  const { admin, fairplay, analysis, payments, tournaments, pool, wallet } = d;
   const staff = (ctx: { requireUser(): { id: string } }, roles: StaffRole[] = []) => admin.requireStaff(ctx.requireUser().id, roles);
   const id = (ctx: { params: Record<string, string> }, what = 'Kayıt'): string => {
     if (!isUuid(ctx.params.id)) throw notFound('NOT_FOUND', `${what} bulunamadı`);
@@ -33,6 +34,23 @@ export function adminRoutes(router: Router, d: {
   router.get('/v1/admin/overview', async (ctx) => {
     await staff(ctx, ['finance', 'fairplay']);
     return admin.overview();
+  });
+
+  // ---- K43 para çekme talepleri ----
+  router.get('/v1/admin/withdrawals', async (ctx) => {
+    await staff(ctx, ['finance']);
+    const st = ctx.query.get('status');
+    return { withdrawals: await wallet.list(st && ['REQUESTED', 'PAID', 'REJECTED', 'CANCELED'].includes(st) ? st : null) };
+  });
+  router.post('/v1/admin/withdrawals/:id/paid', async (ctx) => {
+    const s = await staff(ctx, ['finance']);
+    const b = parse({ payoutRef: { type: 'string', min: 3, max: 120 } }, ctx.body);
+    return wallet.markPaid(s.id, ctx.params.id as string, b.payoutRef);
+  });
+  router.post('/v1/admin/withdrawals/:id/reject', async (ctx) => {
+    const s = await staff(ctx, ['finance']);
+    const b = parse(reasonSchema, ctx.body);
+    return wallet.reject(s.id, ctx.params.id as string, b.reason);
   });
 
   // ---- finans ----
