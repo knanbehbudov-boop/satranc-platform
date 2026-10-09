@@ -116,7 +116,8 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   const ratings = new RatingService(pool);
   events.subscribe('rating', ['game.ended'], ratings.onGameEnded);
 
-  router.get('/v1/bots/levels', () => ({ levels: bots.levels(), engine: bots.engineKind }));
+  // K44: arka plandaki motorun adı dışarıya verilmez.
+  router.get('/v1/bots/levels', () => ({ levels: bots.levels() }));
   router.post('/v1/bots/games', async (ctx) => {
     const user = ctx.requireUser();
     const b = parse(

@@ -443,49 +443,75 @@
     const left = el('div', { class: 'col' });
     const right = el('div', { class: 'col' });
     root.append(left, right);
-    mount(
-      el('header', {},
-        el('p', { class: 'eyebrow' }, 'Eleme usulü · her tur tek oyun'),
-        el('h1', {}, 'Turnuvalar'),
-        el('p', { class: 'lede' }, 'Kontenjan dolunca turnuva başlar. Her tur tek oyundur; berabere biterse 1 dakikalık tekrar oyunları oynanır.'),
-      ),
-      root,
-    );
+    mount(root);
 
     if (appCfg.demoTools) {
-      left.append(el('section', { class: 'card demo', id: 'demo-banner' },
+      right.append(el('section', { class: 'card demo', id: 'demo-banner' },
         el('h2', {}, 'Test sürümü'),
         el('p', { class: 'small' }, 'Ödemeler sahtedir, gerçek para çekilmez. Test kartı: ', el('b', { class: 'mono' }, '4242 4242 4242 4242'), ' · tarih 12/30 · CVC 123.'),
         el('p', { class: 'small muted' }, 'İlk iki hesap yönetici olur. Turnuva sayfasında "Test botlarıyla doldur" ile turnuvayı tek başına başlatabilirsin.'),
       ));
     }
-    const listCard = el('section', { class: 'card', id: 'tournament-list' }, el('h2', {}, 'Açık ve süren turnuvalar'), el('p', { class: 'muted small' }, 'Yükleniyor…'));
+    // Ana ekran (K44): önce ücretli turnuvalar (açık olanlar kare kutucuklarda, süren/başlayacak olanlar
+    // altında), ücretsiz turnuvalar ve bot antrenmanı en altta.
+    const listCard = el('div', { class: 'col', id: 'tournament-list' }, el('section', { class: 'card' }, el('p', { class: 'muted small' }, 'Yükleniyor…')));
     left.append(listCard);
+    const minutes = (tc) => Math.round(Number(String(tc).split('+')[0]) / 60);
 
     let active = null;
     async function loadList() {
       const data = await api('GET', '/v1/tournaments');
       active = data.active;
-      const rows = data.tournaments.map((t) => {
-        const [label, cls] = STATUS[t.status] || [t.status, ''];
-        const seats = el('span', { class: 'seats', 'aria-label': `${t.joined}/${t.capacity} dolu` }, Array.from({ length: Math.min(t.capacity, 16) }, (_, i) => el('i', { class: i < Math.round((t.joined / t.capacity) * Math.min(t.capacity, 16)) ? 'on' : '' })));
+      const paid = data.tournaments.filter((t) => t.entryFeeCents > 0);
+      const free = data.tournaments.filter((t) => !(t.entryFeeCents > 0));
+      const seatsOf = (t) => el('span', { class: 'seats', 'aria-label': `${t.joined}/${t.capacity} dolu` }, Array.from({ length: Math.min(t.capacity, 8) }, (_, i) => el('i', { class: i < Math.round((t.joined / t.capacity) * Math.min(t.capacity, 8)) ? 'on' : '' })));
+      const canJoin = (t) => t.status === 'OPEN' && session.user && !active;
+
+      const open = paid.filter((t) => t.status === 'OPEN').sort((a, b) => a.capacity - b.capacity || minutes(a.timeControl) - minutes(b.timeControl));
+      const tiles = open.map((t) => {
         const mine = active === t.id;
-        const action = t.status === 'OPEN' && session.user && !active
+        const first = t.prizes?.[0]?.cents;
+        const body = [
+          el('span', { class: 'fee' }, money(t.entryFeeCents, t.currency)),
+          el('span', { class: 'tc' }, `${minutes(t.timeControl)} dk · ${t.capacity} kişi`),
+          first ? el('span', { class: 'who' }, `1. ${money(first, t.currency)}${t.prizes[1] ? ` · 2. ${money(t.prizes[1].cents, t.currency)}` : ''}`) : null,
+          el('span', { class: 'who' }, seatsOf(t), ` ${t.joined}/${t.capacity}`),
+        ];
+        return canJoin(t)
+          ? el('button', { class: 'tile', type: 'button', dataset: { join: t.id }, 'aria-label': `${t.name}, katıl`, onclick: () => joinTournament(t) }, body)
+          : el('a', { class: `tile ${mine ? 'mine' : ''}`, href: `#/turnuva/${t.id}` }, body, mine ? el('span', { class: 'pill' }, 'Kayıtlısın') : null);
+      });
+
+      const row = (t) => {
+        const [label, cls] = STATUS[t.status] || [t.status, ''];
+        const mine = active === t.id;
+        const action = canJoin(t)
           ? el('button', { class: 'btn accent', type: 'button', dataset: { join: t.id }, onclick: () => joinTournament(t) }, t.entryFeeCents ? `Katıl · ${money(t.entryFeeCents, t.currency)}` : 'Katıl')
           : el('a', { class: 'btn', href: `#/turnuva/${t.id}` }, mine ? 'Turnuvam' : 'Görüntüle');
         return el('div', { class: 'trow' },
           el('div', { class: 'col tiny' },
             el('div', { class: 'row' }, el('span', { class: 'name' }, t.name), el('span', { class: `pill ${cls}` }, label), mine ? el('span', { class: 'pill' }, 'Kayıtlısın') : null),
             el('div', { class: 'meta' },
-              el('span', {}, `${t.capacity} kişi`), el('span', { class: 'mono' }, t.timeControlLabel),
+              el('span', {}, `${t.capacity} kişi`), el('span', { class: 'mono' }, `${minutes(t.timeControl)} dk`),
               el('span', { class: t.entryFeeCents ? 'fee' : '' }, t.entryFeeCents ? money(t.entryFeeCents, t.currency) : 'Ücretsiz'),
-              el('span', {}, seats, ` ${t.joined}/${t.capacity}`),
+              el('span', {}, seatsOf(t), ` ${t.joined}/${t.capacity}`),
             ),
           ),
           action,
         );
-      });
-      listCard.replaceChildren(el('h2', {}, 'Açık ve süren turnuvalar'), rows.length ? el('div', { class: 'tlist' }, rows) : el('p', { class: 'muted' }, 'Şu an turnuva yok.'));
+      };
+      const going = paid.filter((t) => t.status !== 'OPEN');
+      listCard.replaceChildren(
+        el('section', { class: 'card', id: 'paid-tournaments' },
+          el('div', { class: 'section-head' }, el('h2', {}, 'Ücretli turnuvalar'), el('span', { class: 'small muted' }, 'Kontenjan dolunca başlar · eleme usulü')),
+          tiles.length ? el('div', { class: 'tiles' }, tiles) : el('p', { class: 'muted small' }, 'Şu an açık ücretli turnuva yok.'),
+        ),
+        going.length ? el('section', { class: 'card', id: 'running-tournaments' }, el('h2', {}, 'Süren ve başlayacak turnuvalar'), el('div', { class: 'tlist' }, going.map(row))) : null,
+        el('section', { class: 'card', id: 'free-tournaments' },
+          el('h2', {}, 'Ücretsiz turnuvalar'),
+          free.length ? el('div', { class: 'tlist' }, free.map(row)) : el('p', { class: 'muted small' }, 'Şu an ücretsiz turnuva yok.'),
+        ),
+      );
     }
     await loadList();
 
@@ -520,7 +546,7 @@
           ? el('div', { class: 'ratings' }, r.ratings.map((x) => el('div', { class: 'r' }, el('b', {}, `${x.rating}${x.provisional ? '?' : ''}`), el('span', {}, `${POOL_NAME[x.pool] || x.pool} · ${x.games} oyun`))))
           : el('p', { class: 'muted small' }, 'Henüz rating yok. İlk oyunlarından sonra burada görünür.'),
       ));
-      right.append(botPanel());
+      left.append(botPanel());
     }
 
     let t = null;
@@ -563,7 +589,9 @@
 
   // ---- oyun ekranı -------------------------------------------------------------
 
-  const GLYPH = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
+  const PIECE_NAME = { k: 'şah', q: 'vezir', r: 'kale', b: 'fil', n: 'at', p: 'piyon' };
+  /** Taşlar kendi setimiz (K44): /pieces/wK.svg … bP.svg */
+  const pieceImg = (color, type) => el('img', { class: 'piece', src: `/pieces/${color}${type.toUpperCase()}.svg`, alt: '', draggable: 'false' });
   const FILES = 'abcdefgh';
 
   function gameView(gameId) {
@@ -622,8 +650,8 @@
         if (last && (last.from === sq || last.to === sq)) cls.push('last');
         if (s.selected === sq) cls.push('selected');
         if (checkSq === sq) cls.push('check');
-        return el('button', { type: 'button', class: cls.join(' '), dataset: { square: sq }, 'aria-label': p ? `${sq} ${p.color === 'w' ? 'beyaz' : 'siyah'} ${p.type}` : sq, onclick: () => onSquare(sq) },
-          p ? el('span', { class: `piece ${p.color}` }, GLYPH[p.type] + '︎') : null,
+        return el('button', { type: 'button', class: cls.join(' '), dataset: { square: sq }, 'aria-label': p ? `${sq} ${p.color === 'w' ? 'beyaz' : 'siyah'} ${PIECE_NAME[p.type]}` : sq, onclick: () => onSquare(sq) },
+          p ? pieceImg(p.color, p.type) : null,
           targets.has(sq) ? el('span', { class: p || targets.get(sq).flag === 'e' ? 'target capture' : 'target' }) : null,
           idx % 8 === 0 ? el('span', { class: 'coord rank' }, sq[1]) : null,
           idx >= 56 ? el('span', { class: 'coord file' }, sq[0]) : null,
@@ -632,7 +660,7 @@
       if (s.promo) {
         boardEl.append(el('div', { class: 'promo' }, el('div', { class: 'promo-card' },
           el('div', {}, 'Terfi'),
-          el('div', { class: 'promo-row' }, ['q', 'r', 'b', 'n'].map((t) => el('button', { type: 'button', id: `promo-${t}`, onclick: () => { const { from, to } = s.promo; s.promo = null; send(from, to, t); } }, el('span', { class: `piece ${s.myColor}` }, GLYPH[t] + '︎')))),
+          el('div', { class: 'promo-row' }, ['q', 'r', 'b', 'n'].map((t) => el('button', { type: 'button', id: `promo-${t}`, 'aria-label': PIECE_NAME[t], onclick: () => { const { from, to } = s.promo; s.promo = null; send(from, to, t); } }, pieceImg(s.myColor, t)))),
           el('button', { class: 'btn', type: 'button', onclick: () => { s.promo = null; render(); } }, 'Vazgeç'),
         )));
       }

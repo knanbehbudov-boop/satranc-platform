@@ -1092,6 +1092,8 @@ export class TournamentService {
       entryFeeCents: t.template.entry_fee_cents,
       currency: t.template.currency,
       kind: t.template.kind,
+      /** Kontenjan dolarsa ödül tablosu (sıra, kişi, kişi başı cent). */
+      prizes: this.prizeTable(t),
       readyDeadline: t.ready_deadline,
       createdAt: t.created_at,
     }));

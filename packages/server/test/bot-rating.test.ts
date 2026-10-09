@@ -48,7 +48,8 @@ describe('M4a bot oyunu', () => {
   it('seviyeler listelenir', async () => {
     const p = await newPlayer(env.base);
     const r = await p.client.get('/v1/bots/levels');
-    assert.equal(r.body.engine, 'builtin');
+    assert.equal(r.body.engine, undefined, 'motorun adı dışarıya verilmez (K44)');
+    assert.equal(env.app.bots.engineKind, 'builtin');
     assert.deepEqual(r.body.levels.map((l: any) => l.id), ['baslangic', 'kolay', 'orta', 'ileri', 'usta', 'maksimum']);
   });
 
