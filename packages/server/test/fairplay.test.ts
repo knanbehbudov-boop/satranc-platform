@@ -225,8 +225,9 @@ describe('uçtan uca: analiz kuyruğu, risk, vaka ve ödül kapısı', () => {
 
   it('ücretli turnuva: oyunlar analiz edilmeden ödül serbest kalmaz; işaretli şampiyon bekler, temiz ikinci serbest; iptal kararı rezerve', async () => {
     const code = uniqueName('fp').toLowerCase();
-    await q(`INSERT INTO tournament_templates (code, name, kind, capacity, entry_fee_cents, currency, rake_bps, time_control, ready_seconds, break_seconds)
-             VALUES ($1, $1, 'sng', 4, 1000, 'USD', 1200, '180+2', 10, 0)`, [code]);
+    // İkinciye de ödül veren özel şablon: temiz ikincinin beklemediği doğrulanır.
+    await q(`INSERT INTO tournament_templates (code, name, kind, capacity, entry_fee_cents, currency, rake_bps, time_control, ready_seconds, break_seconds, prize_scheme)
+             VALUES ($1, $1, 'sng', 4, 1000, 'USD', 1000, '180+2', 10, 0, $2)`, [code, JSON.stringify([{ rank: 1, count: 1, share: [7, 9] }, { rank: 2, count: 1, share: [2, 9] }])]);
     await env.app.tournaments.ensureOpen();
     const tid = (await q<{ id: string }>(`SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id WHERE p.code = $1 AND t.status = 'OPEN'`, [code]))[0]!.id;
 
@@ -256,7 +257,7 @@ describe('uçtan uca: analiz kuyruğu, risk, vaka ve ödül kapısı', () => {
     d = await env.app.tournaments.detail(tid);
     assert.ok(d.awards.every((a: any) => a.status === 'PENDING'), 'analiz bitmeden ödül serbest kalmaz');
     const jobs = await q(`SELECT j.status FROM analysis_jobs j JOIN games g ON g.id = j.game_id JOIN matches m ON m.id = g.match_id WHERE m.tournament_id = $1`, [tid]);
-    assert.ok(jobs.length >= 4 && jobs.every((j) => j.status === 'queued'), JSON.stringify(jobs));
+    assert.ok(jobs.length >= 3 && jobs.every((j) => j.status === 'queued'), JSON.stringify(jobs));
 
     // Analizler biter; şampiyonun final oyunu için motor profili + sekme kaybı (sentetik kanıt).
     while (await env.app.analysis.workOnce()) { /* kuyruk boşalana kadar */ }

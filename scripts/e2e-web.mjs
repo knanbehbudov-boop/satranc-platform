@@ -135,7 +135,7 @@ try {
   check(true, 'Turnuva doldu, "Hazırım" düğmesi çıktı ve tıklandı');
 
   let gamesPlayed = await playThrough(tid);
-  check(gamesPlayed.size === 4, `Kullanıcı tahtaya tıklayarak ${gamesPlayed.size} turnuva oyunu oynadı (2 maç × 2)`);
+  check(gamesPlayed.size === 2, `Kullanıcı tahtaya tıklayarak ${gamesPlayed.size} turnuva oyunu oynadı (2 tur × 1 oyun)`);
   await page.goto(env.base + `/#/turnuva/${tid}`);
   await page.waitForSelector('#bracket .match');
   await page.waitForFunction(() => document.querySelector('#tournament-status')?.textContent === 'Tamamlandı', null, { timeout: 10_000 });
@@ -150,7 +150,7 @@ try {
   const pcode = uniqueName('e2epaid').toLowerCase();
   await env.app.pool.query(
     `INSERT INTO tournament_templates (code, name, kind, capacity, entry_fee_cents, currency, rake_bps, time_control, ready_seconds, break_seconds)
-     VALUES ($1, 'Ücretli Uçtan Uca', 'sng', 4, 500, 'USD', 1200, '180+2', 30, 0)`, [pcode]);
+     VALUES ($1, 'Ücretli Uçtan Uca', 'sng', 4, 500, 'USD', 1000, '180+2', 30, 0)`, [pcode]);
   await env.app.tournaments.ensureOpen();
   const ptid = (await env.app.pool.query(`SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id WHERE p.code = $1 AND t.status = 'OPEN'`, [pcode])).rows[0].id;
   for (const b of bots) {
@@ -181,14 +181,14 @@ try {
   check(!payMsg || payMsg.includes('Ödeme alındı'), `Dönüş sayfasında ödeme durumu sunucudan okundu (${payMsg || 'hazır olma ekranı'})`);
   await page.click('#ready');
   const paidGames = await playThrough(ptid);
-  check(paidGames.size >= 4, `Ücretli turnuvada ${paidGames.size} oyun tahtadan oynandı`);
+  check(paidGames.size >= 2, `Ücretli turnuvada ${paidGames.size} oyun tahtadan oynandı`);
   await page.goto(env.base + `/#/turnuva/${ptid}`);
   await page.waitForSelector('#prizes li');
-  check((await page.textContent('#prizes')).includes('12,32'), 'Turnuva sayfası: şampiyon ödülü 12,32 $ (4 × 5 $, %12 komisyon)');
+  check((await page.textContent('#prizes')).includes('18,00'), 'Turnuva sayfası: şampiyon ödülü 18,00 $ (4 × 5 $, %10 sistem payı)');
   if (shots) await page.screenshot({ path: join(shots, 'web-odul.png'), fullPage: true });
   await page.goto(env.base + '/#/cuzdan');
-  await page.waitForFunction(() => document.querySelector('[data-available="USD"]')?.textContent.includes('12,32'), null, { timeout: 20_000 });
-  check(true, 'Cüzdan: bekletme bitince 12,32 $ çekilebilir bakiyede');
+  await page.waitForFunction(() => document.querySelector('[data-available="USD"]')?.textContent.includes('18,00'), null, { timeout: 20_000 });
+  check(true, 'Cüzdan: bekletme bitince 18,00 $ çekilebilir bakiyede');
   check((await page.textContent('#payment-list')).includes('ödendi'), 'Cüzdan: ödeme listesinde giriş ücreti görünüyor');
   if (shots) await page.screenshot({ path: join(shots, 'web-cuzdan.png'), fullPage: true });
   const inv = await env.app.ledger.invariants();

@@ -1,6 +1,6 @@
 // Eşzamanlı turnuva simülasyonu (plan M15, madde 1; Faz 0 ölçeği).
 // Çok sayıda 4 ve 8 kişilik turnuva aynı anda gerçek sunucu ve veritabanı üzerinde
-// oynanır; bazı maçlar bilerek berabere biter (Armageddon). Sonunda doğrulanır:
+// oynanır; bazı maçlar bilerek berabere biter (1 dakikalık tekrar oyunları). Sonunda doğrulanır:
 // her turnuva tamamlandı, tek şampiyon, sıralama doğru, takılı oyun/olay yok, rating tutarlı.
 //   node scripts/simulate.mjs [4 kişilik sayı] [8 kişilik sayı]
 import { createHash } from 'node:crypto';
@@ -64,7 +64,7 @@ try {
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   check(true, `Tüm turnuvalar tamamlandı (${secs} sn)`);
 
-  let armageddons = 0;
+  let tiebreaks = 0;
   let games = 0;
   for (const t of tournaments) {
     const d = await env.app.tournaments.detail(t.id);
@@ -73,15 +73,15 @@ try {
     if (JSON.stringify(ranks) !== JSON.stringify(expected)) check(false, `Sıralama hatalı (${t.id}): ${ranks}`);
     for (const m of d.matches) {
       games += m.games.length;
-      if (m.decidedBy === 'armageddon') armageddons++;
+      if (m.decidedBy === 'tiebreak') tiebreaks++;
       if (m.status !== 'DONE') check(false, `Maç kapanmamış: ${m.id} ${m.status}`);
       const winner = m.winnerId === m.a.id ? 'a' : 'b';
       const strongerWins = (strength.get(m.a.id) > strength.get(m.b.id)) === (winner === 'a');
-      if (m.decidedBy === 'score' && !strongerWins) check(false, `Güçlü oyuncu kaybetmiş: ${m.id}`);
+      if (m.decidedBy === 'game' && !strongerWins) check(false, `Güçlü oyuncu kaybetmiş: ${m.id}`);
     }
   }
   check(failures.length === 0, `Her turnuvada tek şampiyon ve doğru sıralama (1, 2, 3, 3[, 5×4])`);
-  check(armageddons > 0, `Armageddon'a giden maç sayısı: ${armageddons}`);
+  check(tiebreaks > 0, `Tekrar oyunlarına giden maç sayısı: ${tiebreaks}`);
   const active = await env.app.pool.query(`SELECT count(*)::int AS n FROM games WHERE status IN ('active', 'scheduled')`);
   check(active.rows[0].n === 0, 'Takılı oyun yok');
   const pending = await env.app.pool.query(

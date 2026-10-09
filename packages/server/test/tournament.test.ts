@@ -41,7 +41,7 @@ async function waitStatus(id: string, statuses: string[], timeoutMs = 30_000): P
 }
 
 describe('M5 tam turnuva akışı', () => {
-  it('4 kişilik: güçlü olan her maçı 2–0 kazanır; sıralama, olaylar ve commit-reveal doğru', async () => {
+  it('4 kişilik: güçlü olan her maçı tek oyunda kazanır; sıralama, olaylar ve commit-reveal doğru', async () => {
     const id = await openTournament(4);
     const before = await env.app.tournaments.detail(id);
     assert.equal(before.status, 'OPEN');
@@ -67,9 +67,9 @@ describe('M5 tam turnuva akışı', () => {
     assert.deepEqual([...ranks.values()].sort(), [1, 2, 3, 3], 'K8: 1, 2, 3, 3');
     for (const m of done.matches) {
       assert.equal(m.status, 'DONE');
-      assert.equal(m.games.length, 2, 'mini maç 2 oyun');
-      assert.deepEqual([Number(m.scoreA) + Number(m.scoreB)], [2]);
-      assert.notEqual(m.games[0].whiteId, m.games[1].whiteId, 'renkler değişir');
+      assert.equal(m.games.length, 1, 'her tur tek oyun');
+      assert.deepEqual([Number(m.scoreA) + Number(m.scoreB)], [1]);
+      assert.equal(m.decidedBy, 'game');
     }
 
     const events = await env.app.pool.query<{ to_status: string }>('SELECT to_status FROM tournament_events WHERE tournament_id = $1 ORDER BY id', [id]);
@@ -87,28 +87,30 @@ describe('M5 tam turnuva akışı', () => {
 
     // Turnuva oyunları rating'e işlendi (blitz havuzu).
     const champ = await env.app.ratings.ratingFor(players[3]?.id as string, 'blitz');
-    assert.equal(champ.games, 4, 'şampiyon: 2 maç × 2 oyun');
+    assert.equal(champ.games, 2, 'şampiyon: 2 maç × 1 oyun');
     assert.ok(champ.rating > 1500);
     for (const p of players) p.close();
   });
 
-  it('her şey berabere: tüm maçlar Armageddon ile biter, beraberlikte siyah kazanır', async () => {
+  it('beraberlik: 1 dakikalık tekrar oyunları renk değişerek biri kazanana kadar sürer', async () => {
     const id = await openTournament(4);
-    const players = await Promise.all(Array.from({ length: 4 }, () => ScriptedPlayer.create(env.base, () => 'draw')));
+    // İlk oyun ve ilk iki tekrar oyunu berabere; dördüncü oyunu beyaz kazanır.
+    const players = await Promise.all(Array.from({ length: 4 }, () => ScriptedPlayer.create(env.base, (g) => (g.gameNo <= 3 ? 'draw' : g.myColor === 'w' ? 'win' : 'lose'))));
     for (const p of players) await p.client.post(`/v1/tournaments/${id}/join`);
     const done = await waitStatus(id, ['SETTLED']);
     for (const m of done.matches) {
-      assert.equal(m.decidedBy, 'armageddon');
-      assert.equal(m.games.length, 3);
-      const arma = m.games.find((g: any) => g.gameNo === 3);
-      assert.equal(arma.armageddon, true);
-      assert.equal(arma.result, '1/2-1/2');
-      const black = arma.whiteId === m.a.id ? m.b.id : m.a.id;
-      assert.equal(m.winnerId, black, 'beraberlikte siyah tur atlar');
-      assert.deepEqual([Number(m.scoreA), Number(m.scoreB)], [1, 1]);
+      assert.equal(m.decidedBy, 'tiebreak');
+      assert.equal(m.games.length, 4);
+      const games = [...m.games].sort((x: any, y: any) => x.gameNo - y.gameNo);
+      for (let i = 1; i < games.length; i++) {
+        assert.equal(games[i].tiebreak, true);
+        assert.notEqual(games[i].whiteId, games[i - 1].whiteId, 'her tekrar oyununda renk değişir');
+      }
+      assert.equal(m.winnerId, games[3].whiteId, 'son oyunu kazanan tur atlar');
+      assert.deepEqual([Number(m.scoreA) + Number(m.scoreB)], [4]);
     }
-    const g = await env.app.pool.query('SELECT white_initial_ms, black_initial_ms, increment_ms FROM games WHERE armageddon AND match_id = $1', [done.matches[0].id]);
-    assert.deepEqual(g.rows[0], { white_initial_ms: 300_000, black_initial_ms: 240_000, increment_ms: 2_000 });
+    const g = await env.app.pool.query('SELECT time_control, white_initial_ms, increment_ms, rated FROM games WHERE match_id = $1 AND game_no = 2', [done.matches[0].id]);
+    assert.deepEqual(g.rows[0], { time_control: '60+0', white_initial_ms: 60_000, increment_ms: 0, rated: false });
     for (const p of players) p.close();
   });
 });

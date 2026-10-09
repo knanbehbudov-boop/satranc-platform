@@ -238,7 +238,7 @@
     } else if (m.type === 'match.ready') {
       matchTournament.set(m.matchId, m.tournamentId);
       const when = new Date(m.startAt).getTime() - Date.now();
-      const label = m.armageddon ? 'Armageddon oyunu' : `${m.round}, ${m.gameNo}. oyun`;
+      const label = m.tiebreak ? `${m.round}, tekrar oyunu (1 dk)` : m.round;
       toast(`${label} ${when > 1500 ? `${Math.round(when / 1000)} sn sonra başlıyor` : 'başlıyor'}. Rengin: ${m.color === 'w' ? 'beyaz' : 'siyah'}.`, { href: `#/oyun/${m.gameId}`, text: 'Oyuna git' });
     } else if (m.type === 'game.started') {
       if (m.matchId && !matchTournament.has(m.matchId)) matchTournament.set(m.matchId, null);
@@ -409,9 +409,9 @@
     root.append(left, right);
     mount(
       el('header', {},
-        el('p', { class: 'eyebrow' }, 'Eleme usulü · 2 oyunluk mini maçlar'),
+        el('p', { class: 'eyebrow' }, 'Eleme usulü · her tur tek oyun'),
         el('h1', {}, 'Turnuvalar'),
-        el('p', { class: 'lede' }, 'Kontenjan dolunca turnuva başlar. Her eşleşme renk değişimli iki oyundur; eşitlikte Armageddon oynanır.'),
+        el('p', { class: 'lede' }, 'Kontenjan dolunca turnuva başlar. Her tur tek oyundur; berabere biterse 1 dakikalık tekrar oyunları oynanır.'),
       ),
       root,
     );
@@ -653,13 +653,13 @@
     function renderStatus() {
       const st = s.state;
       const g = s.chess;
-      const kind = st.kind === 'tournament' ? (st.armageddon ? 'Turnuva · Armageddon' : `Turnuva · ${st.gameNo}. oyun`) : st.kind === 'bot' ? 'Bot oyunu' : 'Serbest oyun';
+      const kind = st.kind === 'tournament' ? (st.tiebreak ? `Turnuva · ${st.gameNo - 1}. tekrar oyunu (1 dk)` : 'Turnuva') : st.kind === 'bot' ? 'Bot oyunu' : 'Serbest oyun';
       const tid = st.matchId ? matchTournament.get(st.matchId) : null;
       const lines = [el('div', { class: 'spread' }, el('span', { class: 'small muted' }, `${kind} · ${C.parseTimeControl(st.timeControl).label}`), tid ? el('a', { href: `#/turnuva/${tid}`, class: 'small' }, 'Turnuva tablosu') : el('a', { href: '#/', class: 'small' }, 'Lobi'))];
       if (s.ended) {
         const who = s.ended.winner ? `${s.ended.winner === 'w' ? 'Beyaz' : 'Siyah'} kazandı` : 'Berabere';
         lines.push(el('div', { class: 'result', id: 'game-result' }, `${s.ended.result.replace('1/2-1/2', '½–½')} · ${who}`), el('div', { class: 'muted' }, REASON[s.ended.reason] || s.ended.reason || ''));
-        if (s.state.armageddon && !s.ended.winner) lines.push(el('div', { class: 'small' }, 'Armageddon: beraberlikte siyah tur atlar.'));
+        if (s.state.kind === 'tournament' && !s.ended.winner) lines.push(el('div', { class: 'small' }, 'Berabere: renkler değişerek 1 dakikalık tekrar oyunu başlayacak.'));
       } else {
         const mine = s.myColor && g.turn === s.myColor;
         lines.push(el('div', { id: 'turn-line' }, g.isCheck() ? 'Şah! ' : '', mine ? 'Sıra sende.' : s.myColor ? 'Rakibin düşünüyor.' : `Sıra ${g.turn === 'w' ? 'beyazda' : 'siyahta'}.`));
@@ -848,7 +848,7 @@
         ),
         payMsg,
         d.status === 'STARTING' ? el('p', { class: 'msg info' }, `Turnuva doldu. Herkes ${d.readySeconds} saniye içinde "Hazırım" demeli; demeyen hükmen elenir${paid ? ' (ücret iade edilmez)' : ''}.`) : null,
-        el('p', { class: 'small muted' }, `Her eşleşme renk değişimli 2 oyun; 1–1'de Armageddon (beyaz 5 dk, siyah 4 dk, beraberlikte siyah). Oyunlar arası mola ${d.breakSeconds} sn.`),
+        el('p', { class: 'small muted' }, 'Her tur tek oyun. Berabere biterse 1 dakikalık tekrar oyunları oynanır; her seferinde renkler değişir ve biri kazanana kadar sürer.'),
         paid ? el('p', { class: 'small muted', id: 'fairplay-note' }, 'Adil oyun: ücretli oyunlar bittikten sonra motorla analiz edilir; oyun sırasında sekme değiştirme kaydedilir. Ödüller inceleme bitince serbest kalır.') : null,
       );
 
@@ -873,8 +873,8 @@
             : el('ul', { class: 'entrants' }, d.prizes.map((p) => el('li', {}, el('span', {}, rankLabel(p.rank, p.count)), el('b', { class: 'mono' }, p.count > 1 ? `${money(p.cents, d.currency)} (kişi başı)` : money(p.cents, d.currency))))),
           el('p', { class: 'small muted' },
             d.settlement
-              ? `Toplam giriş ${money(d.settlement.grossCents, d.currency)} · komisyon ${money(d.settlement.rakeCents, d.currency)} · ödül havuzu ${money(d.settlement.prizePoolCents, d.currency)}. Ödüller güvenlik incelemesi için bekletilir, sonra çekilebilir bakiyene geçer.`
-              : `Kontenjan dolarsa: ${d.capacity} × ${money(d.entryFeeCents, d.currency)}, komisyon %${(d.rakeBps / 100).toLocaleString('tr-TR')} (ödeme ücretleri dahil). Kuruş artığı şampiyona eklenir.`),
+              ? `Toplam giriş ${money(d.settlement.grossCents, d.currency)} · sistem payı ${money(d.settlement.rakeCents, d.currency)} · ödül havuzu ${money(d.settlement.prizePoolCents, d.currency)}. Ödüller güvenlik incelemesi için bekletilir, sonra çekilebilir bakiyene geçer.`
+              : `Kontenjan dolarsa: ${d.capacity} × ${money(d.entryFeeCents, d.currency)}, sistem payı %${(d.rakeBps / 100).toLocaleString('tr-TR')}. Kuruş artığı şampiyona eklenir.`),
         );
       }
 
@@ -906,9 +906,9 @@
       const foot = [];
       if (m.decidedBy === 'no_show') foot.push('hükmen');
       if (m.decidedBy === 'walkover') foot.push('rakipsiz geçti');
-      if (m.decidedBy === 'armageddon') foot.push('Armageddon ile');
+      if (m.decidedBy === 'tiebreak') foot.push('tekrar oyunuyla');
       for (const g of m.games) {
-        foot.push(el('a', { href: `#/oyun/${g.id}` }, g.armageddon ? 'A' : `${g.gameNo}.`, g.status === 'active' ? ' canlı' : g.result ? ` ${g.result.replace('1/2-1/2', '½')}` : ' bekliyor'));
+        foot.push(el('a', { href: `#/oyun/${g.id}` }, g.tiebreak ? `T${g.gameNo - 1}` : 'Oyun', g.status === 'active' ? ' canlı' : g.result ? ` ${g.result.replace('1/2-1/2', '½')}` : ' bekliyor'));
       }
       return el('div', { class: `match${mine ? ' mine' : ''}` }, side(m.a, m.scoreA, true), side(m.b, m.scoreB, false), foot.length ? el('div', { class: 'foot' }, foot) : null);
     }

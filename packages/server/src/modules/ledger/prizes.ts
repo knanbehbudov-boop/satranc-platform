@@ -12,28 +12,62 @@ export interface PrizeGroup {
   rank: number;
   /** Bu sıralamadaki oyuncu sayısı (3.-4. için 2). */
   count: number;
-  /** Kişi başı pay, baz puan (10000 = %100). */
-  bpsEach: number;
+  /** Kişi başı pay, baz puan (10000 = %100). `share` verilmişse kullanılmaz. */
+  bpsEach?: number;
+  /** Kişi başı pay, tam kesir [pay, payda] — havuzun tam oranı (ör. 2/9). */
+  share?: readonly [number, number];
 }
 
+/** Bir payın havuz içindeki kesri. */
+export function shareOf(g: PrizeGroup): [number, number] {
+  if (g.share) return [g.share[0], g.share[1]];
+  return [g.bpsEach ?? 0, 10_000];
+}
+
+/** Kişi başı pay (cent), aşağı yuvarlanır. */
+export function shareCents(poolCents: number, g: PrizeGroup): number {
+  const [n, d] = shareOf(g);
+  return Math.floor((poolCents * n) / d);
+}
+
+/**
+ * Varsayılan ödül şablonları. Sistem payı (%10) havuzdan önce alınır; havuz brütün %90'ıdır.
+ *  - 4 kişi: tüm havuz birinciye (brütün %90'ı).
+ *  - 8 ve 16 kişi: birinci brütün %70'i (havuzun 7/9'u), ikinci brütün %20'si (havuzun 2/9'u).
+ *  - 32 kişi: ilk sürümde kapalı; şablon ileride açılmak üzere 8/16 ile aynı.
+ */
 export const DEFAULT_SCHEMES: Readonly<Record<number, readonly PrizeGroup[]>> = {
-  4: [{ rank: 1, count: 1, bpsEach: 7000 }, { rank: 2, count: 1, bpsEach: 3000 }],
-  8: [{ rank: 1, count: 1, bpsEach: 5500 }, { rank: 2, count: 1, bpsEach: 2500 }, { rank: 3, count: 2, bpsEach: 1000 }],
-  16: [{ rank: 1, count: 1, bpsEach: 4000 }, { rank: 2, count: 1, bpsEach: 2000 }, { rank: 3, count: 2, bpsEach: 1000 }, { rank: 5, count: 4, bpsEach: 500 }],
-  32: [
-    { rank: 1, count: 1, bpsEach: 3000 }, { rank: 2, count: 1, bpsEach: 1600 }, { rank: 3, count: 2, bpsEach: 800 },
-    { rank: 5, count: 4, bpsEach: 400 }, { rank: 9, count: 8, bpsEach: 275 },
-  ],
+  4: [{ rank: 1, count: 1, share: [1, 1] }],
+  8: [{ rank: 1, count: 1, share: [7, 9] }, { rank: 2, count: 1, share: [2, 9] }],
+  16: [{ rank: 1, count: 1, share: [7, 9] }, { rank: 2, count: 1, share: [2, 9] }],
+  32: [{ rank: 1, count: 1, share: [7, 9] }, { rank: 2, count: 1, share: [2, 9] }],
 };
 
+/** Platform payı: brütün %10'u. */
+export const PLATFORM_RAKE_BPS = 1000;
+
+function gcd(a: number, b: number): number {
+  return b ? gcd(b, a % b) : Math.abs(a);
+}
+
 export function validateScheme(scheme: readonly PrizeGroup[], capacity: number): void {
-  const total = scheme.reduce((s, g) => s + g.count * g.bpsEach, 0);
-  if (total !== 10_000) throw new Error(`Ödül şablonu %100 etmiyor: ${total / 100}%`);
+  // Tam kesir toplamı: Σ count·n/d = 1 olmalı.
+  let num = 0;
+  let den = 1;
+  for (const g of scheme) {
+    const [n, d] = shareOf(g);
+    if (!Number.isInteger(n) || !Number.isInteger(d) || n <= 0 || d <= 0) throw new Error('Pay pozitif tam kesir olmalı');
+    num = num * d + g.count * n * den;
+    den = den * d;
+    const k = gcd(num, den);
+    num /= k;
+    den /= k;
+  }
+  if (num !== den) throw new Error(`Ödül şablonu %100 etmiyor: ${((num / den) * 100).toFixed(2)}%`);
   const ranks = scheme.map((g) => g.rank);
   if (ranks[0] !== 1) throw new Error('Ödül şablonu 1. sırayı içermeli');
   const seats = scheme.reduce((s, g) => s + g.count, 0);
   if (seats > capacity) throw new Error('Ödül alan kişi sayısı kontenjandan fazla');
-  for (const g of scheme) if (!Number.isInteger(g.bpsEach) || g.bpsEach <= 0) throw new Error('Pay pozitif tamsayı baz puan olmalı');
 }
 
 export function schemeFor(capacity: number, custom?: unknown): readonly PrizeGroup[] {
@@ -76,7 +110,7 @@ export function distribute(poolCents: number, scheme: readonly PrizeGroup[], ran
   const awards = new Map<string, Award>();
   let paid = 0;
   for (const g of scheme) {
-    const each = Math.floor((poolCents * g.bpsEach) / 10_000);
+    const each = shareCents(poolCents, g);
     const holders = [...ranks].filter(([, r]) => r === g.rank).map(([u]) => u).sort();
     for (const u of holders.slice(0, g.count)) {
       awards.set(u, { userId: u, rank: g.rank, cents: each });

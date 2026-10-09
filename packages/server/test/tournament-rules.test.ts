@@ -6,6 +6,7 @@ import {
   canTransition,
   eliminationRank,
   judgeMatch,
+  TIEBREAK_TIME_CONTROL,
   roundName,
   seedCommitment,
   seedPositions,
@@ -80,29 +81,27 @@ describe('M5 commit-reveal', () => {
   });
 });
 
-describe('M5 mini maç', () => {
+describe('M5 maç: tek oyun + beraberlikte 1 dakikalık tekrar oyunları', () => {
   const g = (gameNo: number, aWasWhite: boolean, result: '1-0' | '0-1' | '1/2-1/2') => ({ gameNo, aWasWhite, result });
 
-  it('ilk oyundan sonra ikinci oyun (renk değişir)', () => {
-    assert.deepEqual(judgeMatch([g(1, true, '1-0')]), { kind: 'next-game', gameNo: 2, aWhite: false });
+  it('ilk oyun kazanılırsa maç biter', () => {
+    assert.deepEqual(judgeMatch([g(1, true, '1-0')]), { kind: 'decided', winner: 'a', scoreA: 1, scoreB: 0, by: 'game' });
+    assert.deepEqual(judgeMatch([g(1, true, '0-1')]), { kind: 'decided', winner: 'b', scoreA: 0, scoreB: 1, by: 'game' });
   });
 
-  it('2–0 ve 1,5–0,5 karar', () => {
-    assert.deepEqual(judgeMatch([g(1, true, '1-0'), g(2, false, '0-1')]), { kind: 'decided', winner: 'a', scoreA: 2, scoreB: 0, by: 'score' });
-    assert.deepEqual(judgeMatch([g(1, true, '1/2-1/2'), g(2, false, '1-0')]), { kind: 'decided', winner: 'b', scoreA: 0.5, scoreB: 1.5, by: 'score' });
+  it('beraberlik tekrar oyunu ister, renkler değişir', () => {
+    assert.deepEqual(judgeMatch([g(1, true, '1/2-1/2')]), { kind: 'tiebreak', gameNo: 2, aWhite: false });
+    assert.deepEqual(judgeMatch([g(1, true, '1/2-1/2'), g(2, false, '1/2-1/2')]), { kind: 'tiebreak', gameNo: 3, aWhite: true });
   });
 
-  it('1–1 ve ½–½ Armageddon ister', () => {
-    assert.deepEqual(judgeMatch([g(1, true, '1-0'), g(2, false, '1-0')]), { kind: 'armageddon' });
-    assert.deepEqual(judgeMatch([g(1, true, '1/2-1/2'), g(2, false, '1/2-1/2')]), { kind: 'armageddon' });
+  it('biri kazanana kadar devam eder; beraberlik kimseye üstünlük vermez', () => {
+    const draws = Array.from({ length: 9 }, (_, i) => g(i + 1, i % 2 === 0, '1/2-1/2'));
+    assert.deepEqual(judgeMatch(draws), { kind: 'tiebreak', gameNo: 10, aWhite: false });
+    const v = judgeMatch([...draws, g(10, false, '1-0')]);
+    assert.deepEqual(v, { kind: 'decided', winner: 'b', scoreA: 4.5, scoreB: 5.5, by: 'tiebreak' });
   });
 
-  it('Armageddon: beraberlikte siyah kazanır', () => {
-    const tied = [g(1, true, '1-0'), g(2, false, '1-0')];
-    assert.equal((judgeMatch([...tied, g(3, true, '1/2-1/2')]) as any).winner, 'b', 'A beyazdı, beraberlik → B (siyah)');
-    assert.equal((judgeMatch([...tied, g(3, false, '1/2-1/2')]) as any).winner, 'a', 'A siyahtı, beraberlik → A');
-    assert.equal((judgeMatch([...tied, g(3, true, '1-0')]) as any).winner, 'a');
-    const v = judgeMatch([...tied, g(3, false, '1-0')]);
-    assert.deepEqual(v, { kind: 'decided', winner: 'b', scoreA: 1, scoreB: 1, by: 'armageddon' });
+  it('tekrar oyunu 1 dakika, artışsız', () => {
+    assert.equal(TIEBREAK_TIME_CONTROL, '60+0');
   });
 });

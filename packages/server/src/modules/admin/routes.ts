@@ -11,7 +11,7 @@ import type { AnalysisService } from '../fairplay/analysis.ts';
 import type { FairPlayService } from '../fairplay/service.ts';
 import type { PaymentService } from '../payments/service.ts';
 import type { TournamentService } from '../tournament/service.ts';
-import { schemeFor } from '../ledger/prizes.ts';
+import { PLATFORM_RAKE_BPS, schemeFor } from '../ledger/prizes.ts';
 import type { Pool } from '../../infra/db/pg.ts';
 import type { AdminService, StaffRole } from './service.ts';
 
@@ -160,16 +160,17 @@ export function adminRoutes(router: Router, d: {
       },
       ctx.body,
     );
-    if (![4, 8, 16, 32].includes(b.capacity)) throw badRequest('VALIDATION', 'Kontenjan 4, 8, 16 ya da 32 olmalı');
+    // K41: ilk sürümde 4, 8 ve 16 kişilik turnuvalar; 32 kişilik sonra açılacak.
+    if (![4, 8, 16].includes(b.capacity)) throw badRequest('VALIDATION', 'Kontenjan 4, 8 ya da 16 olmalı');
     const fee = b.entryFeeCents ?? 0;
-    // K10: ücretli turnuvada komisyon %12–15 bandı (aşağısı ödeme ücretini karşılamaz).
-    if (fee > 0 && (b.rakeBps === undefined || b.rakeBps < 1200 || b.rakeBps > 1500)) throw badRequest('VALIDATION', 'Ücretli turnuvada komisyon %12–15 arası olmalı (K10)');
+    // K41: ücretli turnuvada sistem payı her zaman %10.
+    if (fee > 0 && b.rakeBps !== undefined && b.rakeBps !== PLATFORM_RAKE_BPS) throw badRequest('VALIDATION', 'Ücretli turnuvada sistem payı %10 olmalı');
     if (fee > 0 && fee < 100) throw badRequest('VALIDATION', 'Giriş ücreti en az 1,00 olmalı');
     schemeFor(b.capacity);
     const r = await pool.query<{ id: string }>(
       `INSERT INTO tournament_templates (code, name, kind, capacity, time_control, ready_seconds, break_seconds, entry_fee_cents, currency, rake_bps)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [b.code, b.name, fee > 0 ? 'sng' : 'free', b.capacity, b.timeControl, b.readySeconds, b.breakSeconds, fee, b.currency ?? 'USD', fee > 0 ? b.rakeBps : 0],
+      [b.code, b.name, fee > 0 ? 'sng' : 'free', b.capacity, b.timeControl, b.readySeconds, b.breakSeconds, fee, b.currency ?? 'USD', fee > 0 ? PLATFORM_RAKE_BPS : 0],
     );
     await admin.audit(pool, s.id, 'template.create', 'tournament_template', (r.rows[0] as { id: string }).id, b, ctx.ip);
     await tournaments.ensureOpen();

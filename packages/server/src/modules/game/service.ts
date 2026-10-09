@@ -518,6 +518,7 @@ export class GameService {
       matchId: room.row.match_id,
       gameNo: room.row.game_no,
       armageddon: room.row.armageddon,
+      tiebreak: room.row.kind === 'tournament' && Number(room.row.game_no) > 1,
       timeControl: room.row.time_control,
       initialFen: room.chess.initialFen(),
       fen: room.chess.fen(),

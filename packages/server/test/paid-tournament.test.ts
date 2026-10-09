@@ -232,23 +232,23 @@ describe('ücretli kayıt ve koltuk', () => {
 });
 
 describe('ücretli turnuva sonu: hesaplaşma, bekletme, cüzdan', () => {
-  it('4 kişi × 5 USD, %12: 17,60 havuz → 12,32 / 5,28; bekletme sonrası çekilebilir; emanet sıfır', async () => {
-    const id = await openPaid(4, 500, 1200);
+  it('4 kişi × 5 USD, %10: 18,00 havuz → birinciye 18,00; bekletme sonrası çekilebilir; emanet sıfır', async () => {
+    const id = await openPaid(4, 500, 1000);
     const players = await strongestWins(4);
     for (const p of players) await joinAndPay(p.client, id);
     const done = await waitStatus(id, ['SETTLING', 'SETTLED']);
-    assert.deepEqual(done.settlement && [done.settlement.grossCents, done.settlement.rakeCents, done.settlement.prizePoolCents], [2000, 240, 1760]);
+    assert.deepEqual(done.settlement && [done.settlement.grossCents, done.settlement.rakeCents, done.settlement.prizePoolCents], [2000, 200, 1800]);
     const champ = players[3]!;
     const byUser = new Map(done.awards.map((a: any) => [a.id, a]));
-    assert.equal((byUser.get(champ.id) as any).cents, 1232);
-    assert.equal(done.awards.reduce((s: number, a: any) => s + a.cents, 0), 1760);
+    assert.equal((byUser.get(champ.id) as any).cents, 1800);
+    assert.equal(done.awards.length, 1, '4 kişide yalnız birinci ödül alır');
     assert.equal(await bal(`TOURNAMENT_POOL:${id}`), 0, 'emanet tamamen dağıtıldı');
 
     const settled = await waitStatus(id, ['SETTLED'], 10_000);
     assert.ok(settled.awards.every((a: any) => a.status === 'RELEASED'));
     const w = await champ.client.get('/v1/me/wallet');
     const usd = w.body.balances.find((b: any) => b.currency === 'USD');
-    assert.equal(usd.availableCents, 1232);
+    assert.equal(usd.availableCents, 1800);
     assert.equal(usd.pendingCents, 0);
     assert.equal(w.body.awards[0].status, 'RELEASED');
     assert.equal(w.body.payments[0].status, 'SUCCEEDED');

@@ -111,7 +111,10 @@ export function roundName(round: number, totalRounds: number): string {
   return ['Final', 'Yarı final', 'Çeyrek final', 'Son 16', 'Son 32'][left] ?? `${round}. tur`;
 }
 
-// ---- mini maç (doküman 3.2, 3.5) -----------------------------------------------
+// ---- maç: tek oyun + beraberlikte kısa tekrar oyunları -------------------------
+
+/** Beraberlikte oynanan tekrar oyunlarının zaman kontrolü: 1 dk, artışsız. */
+export const TIEBREAK_TIME_CONTROL = '60+0';
 
 export interface GameOutcome {
   gameNo: number;
@@ -121,9 +124,8 @@ export interface GameOutcome {
 }
 
 export type MatchVerdict =
-  | { kind: 'next-game'; gameNo: 2; aWhite: false }
-  | { kind: 'armageddon' }
-  | { kind: 'decided'; winner: 'a' | 'b'; scoreA: number; scoreB: number; by: 'score' | 'armageddon' };
+  | { kind: 'tiebreak'; gameNo: number; aWhite: boolean }
+  | { kind: 'decided'; winner: 'a' | 'b'; scoreA: number; scoreB: number; by: 'game' | 'tiebreak' };
 
 export function pointsFor(o: GameOutcome): { a: number; b: number } {
   const white = o.result === '1-0' ? 1 : o.result === '0-1' ? 0 : 0.5;
@@ -131,24 +133,24 @@ export function pointsFor(o: GameOutcome): { a: number; b: number } {
 }
 
 /**
- * İki oyunluk mini maç (renk değişimli). 1–1 ise Armageddon: beraberlikte siyah kazanır.
- * Armageddon puanı maç skoruna eklenmez; yalnız turu belirler.
+ * Her tur tek oyundur. Oyun berabere biterse 1'er dakikalık tekrar oyunu oynanır;
+ * her tekrar oyununda renkler değişir. Biri kazanana kadar devam eder (süre veya
+ * başka bir yolla bitmez). Skor tüm oyunların toplamıdır.
  */
 export function judgeMatch(outcomes: readonly GameOutcome[]): MatchVerdict {
-  const regular = outcomes.filter((o) => o.gameNo <= 2).sort((x, y) => x.gameNo - y.gameNo);
+  const games = [...outcomes].sort((x, y) => x.gameNo - y.gameNo);
   let a = 0;
   let b = 0;
-  for (const o of regular) {
+  for (const o of games) {
     const p = pointsFor(o);
     a += p.a;
     b += p.b;
   }
-  if (regular.length < 2) return { kind: 'next-game', gameNo: 2, aWhite: false };
-  if (a !== b) return { kind: 'decided', winner: a > b ? 'a' : 'b', scoreA: a, scoreB: b, by: 'score' };
-  const arma = outcomes.find((o) => o.gameNo === 3);
-  if (!arma) return { kind: 'armageddon' };
-  const whiteWins = arma.result === '1-0';
-  // Beraberlik ya da siyah galibiyeti: siyah kazanır.
-  const aWins = whiteWins ? arma.aWasWhite : !arma.aWasWhite;
-  return { kind: 'decided', winner: aWins ? 'a' : 'b', scoreA: a, scoreB: b, by: 'armageddon' };
+  const last = games[games.length - 1];
+  if (!last) return { kind: 'tiebreak', gameNo: 1, aWhite: true };
+  if (last.result !== '1/2-1/2') {
+    const aWon = pointsFor(last).a === 1;
+    return { kind: 'decided', winner: aWon ? 'a' : 'b', scoreA: a, scoreB: b, by: last.gameNo === 1 ? 'game' : 'tiebreak' };
+  }
+  return { kind: 'tiebreak', gameNo: last.gameNo + 1, aWhite: !last.aWasWhite };
 }

@@ -33,11 +33,40 @@ describe('M8 ödül matematiği', () => {
     for (const [cap, s] of Object.entries(DEFAULT_SCHEMES)) validateScheme(s, Number(cap));
   });
 
-  it('doküman 5.7 örneği: 8 kişi, 10 USD, %12 → 38,72 / 17,60 / 7,04 / 7,04', () => {
-    const split = splitGross(1000, 8, 1200);
-    assert.deepEqual(split, { grossCents: 8000, rakeCents: 960, poolCents: 7040 });
-    const a = distribute(split.poolCents, schemeFor(8), ranksFor(8));
-    assert.deepEqual(a.map((x) => x.cents), [3872, 1760, 704, 704]);
+  it('K41 örnekleri: sistem %10; 4 kişide birinci %90; 8 ve 16 kişide %70 / %20', () => {
+    const s4 = splitGross(500, 4, 1000);
+    assert.deepEqual(s4, { grossCents: 2000, rakeCents: 200, poolCents: 1800 });
+    assert.deepEqual(distribute(s4.poolCents, schemeFor(4), ranksFor(4)).map((x) => x.cents), [1800]);
+
+    const s8 = splitGross(3000, 8, 1000);
+    assert.deepEqual(s8, { grossCents: 24000, rakeCents: 2400, poolCents: 21600 });
+    assert.deepEqual(distribute(s8.poolCents, schemeFor(8), ranksFor(8)).map((x) => x.cents), [16800, 4800]);
+
+    const s8b = splitGross(1000, 8, 1000);
+    assert.deepEqual(distribute(s8b.poolCents, schemeFor(8), ranksFor(8)).map((x) => x.cents), [5600, 1600], '80$ → 56$ / 16$ / 8$');
+
+    const s16 = splitGross(4000, 16, 1000);
+    assert.deepEqual(distribute(s16.poolCents, schemeFor(16), ranksFor(16)).map((x) => x.cents), [44800, 12800]);
+  });
+
+  it('ücret tablosundaki her turnuva: birinci ve ikinci tam brütün %70 ve %20si', () => {
+    const table: Record<number, number[]> = { 4: [500, 1000, 1500], 8: [1000, 2000, 3000], 16: [2000, 3000, 4000] };
+    for (const [cap, fees] of Object.entries(table)) {
+      for (const fee of fees) {
+        const n = Number(cap);
+        const split = splitGross(fee, n, 1000);
+        const a = distribute(split.poolCents, schemeFor(n), ranksFor(n)).map((x) => x.cents);
+        if (n === 4) assert.deepEqual(a, [fee * n * 0.9]);
+        else assert.deepEqual(a, [fee * n * 0.7, fee * n * 0.2], `${n} kişi ${fee}`);
+      }
+    }
+  });
+
+  it('eski baz puanlı özel şablonlar da çalışır', () => {
+    const custom = [{ rank: 1, count: 1, bpsEach: 7000 }, { rank: 2, count: 1, bpsEach: 3000 }];
+    validateScheme(custom, 4);
+    assert.throws(() => validateScheme([{ rank: 1, count: 1, bpsEach: 9000 }], 4));
+    assert.throws(() => validateScheme([{ rank: 1, count: 1, share: [7, 9] }], 4));
   });
 
   it('4/8/16/32 × farklı ücret × farklı komisyon: dağıtılan toplam = havuz, 1 cent bile fark yok', () => {
@@ -58,11 +87,12 @@ describe('M8 ödül matematiği', () => {
   });
 
   it('yuvarlama artığı şampiyona (K4); sahipsiz pay şampiyona (K27)', () => {
-    const a = distribute(1001, schemeFor(4), new Map([['a', 1], ['b', 2]]));
-    assert.deepEqual(a.map((x) => [x.userId, x.cents]), [['a', 701], ['b', 300]]);
-    // 8 kişilik, bir yarı final boş kaldı: tek 3. var; ikinci 3.'lük payı şampiyona gider.
-    const b = distribute(7040, schemeFor(8), new Map([['c', 1], ['d', 2], ['e', 3]]));
-    assert.deepEqual(b.map((x) => [x.userId, x.cents]), [['c', 3872 + 704], ['d', 1760], ['e', 704]]);
+    // 8 kişilik: 1001 cent havuz → ikinci floor(1001·2/9)=222, artık şampiyona.
+    const a = distribute(1001, schemeFor(8), new Map([['a', 1], ['b', 2]]));
+    assert.deepEqual(a.map((x) => [x.userId, x.cents]), [['a', 779], ['b', 222]]);
+    // Final oynanmadı (ikinci yok): ikincinin payı şampiyona gider.
+    const b = distribute(7200, schemeFor(8), new Map([['c', 1]]));
+    assert.deepEqual(b.map((x) => [x.userId, x.cents]), [['c', 7200]]);
   });
 
   it('bozuk şablon reddedilir', () => {
@@ -158,16 +188,16 @@ describe('M8 defter: turnuva akışı', () => {
     await L.refundEntry(pool, { paymentId: payments[8] as string, tournamentId: tid, cents: 1000, currency: 'USD' });
     assert.equal(await L.balance(pool, ACC.pool(tid).code), 8000);
 
-    const split = splitGross(1000, 8, 1200);
+    const split = splitGross(1000, 8, 1000);
     const ranks = new Map(players.slice(0, 8).map((p, i) => [p.id, [1, 2, 3, 3, 5, 5, 5, 5][i] as number]));
     const awards = distribute(split.poolCents, schemeFor(8), ranks);
     await L.settleTournament(pool, { tournamentId: tid, currency: 'USD', rakeCents: split.rakeCents, awards });
     assert.equal(await L.balance(pool, ACC.pool(tid).code), 0, 'emanet sıfırlandı');
     const champ = players[0]?.id as string;
-    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 3872, availableCents: 0 }]);
-    await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 3872, currency: 'USD' });
-    await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 3872, currency: 'USD' }); // tekrar: etkisiz
-    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 0, availableCents: 3872 }]);
+    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 5600, availableCents: 0 }]);
+    await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 5600, currency: 'USD' });
+    await L.releasePrize(pool, { tournamentId: tid, userId: champ, cents: 5600, currency: 'USD' }); // tekrar: etkisiz
+    assert.deepEqual(await L.userBalances(champ), [{ currency: 'USD', pendingCents: 0, availableCents: 5600 }]);
     const inv = await L.invariants();
     assert.equal(inv.balanced, true);
     assert.equal(inv.negativeUserBalances, 0);

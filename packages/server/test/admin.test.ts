@@ -155,12 +155,13 @@ describe('adil oyun vakası kararı', () => {
 });
 
 describe('turnuva yönetimi', () => {
-  it('ücretli şablon: K10 komisyon bandı denetlenir; şablon açılınca turnuva açılır; iptal herkese iade', async () => {
+  it('ücretli şablon: sistem payı %10 denetlenir (K41); şablon açılınca turnuva açılır; iptal herkese iade', async () => {
     const code = uniqueName('adm').toLowerCase();
     const base = { code, name: 'Yönetim Kupası', capacity: 4, timeControl: '180+2', readySeconds: 30, breakSeconds: 0, entryFeeCents: 500, currency: 'USD' };
-    assert.equal((await A.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 500 })).status, 400);
-    assert.equal((await F.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 1200 })).status, 403, 'şablonu yalnız admin açar');
-    const t = await A.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 1200 });
+    assert.equal((await A.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 1200 })).status, 400);
+    assert.equal((await A.client.post('/v1/admin/tournament-templates', { ...base, code: `${code}-x`, capacity: 32 })).status, 400, '32 kişilik henüz kapalı');
+    assert.equal((await F.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 1000 })).status, 403, 'şablonu yalnız admin açar');
+    const t = await A.client.post('/v1/admin/tournament-templates', { ...base, rakeBps: 1000 });
     assert.equal(t.status, 201);
     const tid = (await q<{ id: string }>(`SELECT id FROM tournaments WHERE template_id = $1 AND status = 'OPEN'`, [t.body.template.id]))[0]!.id;
     const j = await P.client.post(`/v1/tournaments/${tid}/join`);

@@ -13,8 +13,8 @@
  *   final → SETTLING: komisyon + ödüller bekletmede (USER_PRIZE_PENDING)
  *   bekletme bitti ve risk kapısı temiz → çekilebilir bakiye, SETTLED; değilse DISPUTED.
  */
-import { randomBytes, randomInt } from 'node:crypto';
-import { armageddonClocks, parseTimeControl } from '@satranc/chess-core';
+import { randomBytes } from 'node:crypto';
+import { parseTimeControl } from '@satranc/chess-core';
 import type { Config } from '../../config.ts';
 import type { Connection, Pool, Queryable } from '../../infra/db/pg.ts';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../infra/errors.ts';
@@ -26,16 +26,18 @@ import type { IdentityService } from '../identity/service.ts';
 import { poolFor, type RatingService } from '../rating/service.ts';
 import type { FlagService } from '../admin/flags.ts';
 import type { LedgerService } from '../ledger/service.ts';
-import { distribute, holdSecondsFor, schemeFor, splitGross, type PrizeGroup } from '../ledger/prizes.ts';
+import { distribute, holdSecondsFor, PLATFORM_RAKE_BPS, schemeFor, shareCents, splitGross, type PrizeGroup } from '../ledger/prizes.ts';
 import type { PaymentService } from '../payments/service.ts';
 import {
   buildBracket,
   canTransition,
   eliminationRank,
   judgeMatch,
+  pointsFor,
   roundName,
   roundsFor,
   seedCommitment,
+  TIEBREAK_TIME_CONTROL,
   verifiableShuffle,
   type GameOutcome,
   type TournamentStatus,
@@ -109,14 +111,49 @@ type Notes = (() => void)[];
 
 const ACTIVE_STATUSES: TournamentStatus[] = ['OPEN', 'FULL', 'STARTING', 'RUNNING'];
 
-/** Faz 0'da her zaman açık tutulan ücretsiz SNG şablonları. */
+/**
+ * Ücret tablosu (K41): kontenjan × süre. Ücret oyuncu sayısı ve süreyle artar; sistem payı %10.
+ * İlk sürümde 4, 8 ve 16 kişilik turnuvalar; 32 kişilik sonra açılacak.
+ */
+export const TIME_CONTROLS = [
+  { minutes: 3, code: '180+2' },
+  { minutes: 5, code: '300+3' },
+  { minutes: 10, code: '600+5' },
+] as const;
+
+export const FEE_TABLE_CENTS: Readonly<Record<number, readonly [number, number, number]>> = {
+  4: [500, 1000, 1500],
+  8: [1000, 2000, 3000],
+  16: [2000, 3000, 4000],
+};
+
+const PAID_TEMPLATES = Object.entries(FEE_TABLE_CENTS).flatMap(([cap, fees]) =>
+  TIME_CONTROLS.map((tc, i) => {
+    const capacity = Number(cap);
+    const fee = fees[i] as number;
+    return {
+      code: `sng-${capacity}-${tc.minutes}dk`,
+      name: `${fee / 100} USD · ${capacity} kişi · ${tc.minutes} dk`,
+      kind: 'sng',
+      fee,
+      rake: PLATFORM_RAKE_BPS,
+      capacity,
+      time_control: tc.code,
+      ready_seconds: capacity === 4 ? 60 : 90,
+      break_seconds: capacity === 4 ? 30 : 45,
+    };
+  }),
+);
+
+/** Her zaman açık tutulan şablonlar. Ücretliler paid_tournaments bayrağı kapalıyken açılmaz. */
 const DEFAULT_TEMPLATES = [
+  ...PAID_TEMPLATES,
   { code: 'ucretsiz-4-blitz', name: 'Ücretsiz 4 kişilik Blitz', kind: 'free', fee: 0, rake: 0, capacity: 4, time_control: '180+2', ready_seconds: 60, break_seconds: 30 },
   { code: 'ucretsiz-8-blitz', name: 'Ücretsiz 8 kişilik Blitz', kind: 'free', fee: 0, rake: 0, capacity: 8, time_control: '300+3', ready_seconds: 90, break_seconds: 60 },
-  // Ücretli SNG'ler (doküman 3.9 örneği: %12 komisyon). paid_tournaments bayrağı kapalıyken açılmaz.
-  { code: 'sng-4-blitz-5usd', name: '5 USD · 4 kişilik Blitz', kind: 'sng', fee: 500, rake: 1200, capacity: 4, time_control: '180+2', ready_seconds: 60, break_seconds: 30 },
-  { code: 'sng-8-blitz-10usd', name: '10 USD · 8 kişilik Blitz', kind: 'sng', fee: 1000, rake: 1200, capacity: 8, time_control: '300+3', ready_seconds: 90, break_seconds: 60 },
 ];
+
+/** Önceki sürümün ücretli şablonları: kapatılır, boş açık turnuvaları iptal edilir. */
+const RETIRED_TEMPLATES = ['sng-4-blitz-5usd', 'sng-8-blitz-10usd'];
 
 export class TournamentService {
   private readonly pool: Pool;
@@ -179,6 +216,19 @@ export class TournamentService {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (code) DO NOTHING`,
         [t.code, t.name, t.kind, t.fee, t.rake, t.capacity, t.time_control, t.ready_seconds, t.break_seconds],
       );
+    }
+    await this.pool.query('UPDATE tournament_templates SET active = false WHERE code = ANY($1) AND active', [RETIRED_TEMPLATES]);
+    const stale = await this.pool.query<{ id: string }>(
+      `SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id
+       WHERE p.code = ANY($1) AND t.status = 'OPEN'
+         AND NOT EXISTS (SELECT 1 FROM entries e WHERE e.tournament_id = t.id)`,
+      [RETIRED_TEMPLATES],
+    );
+    for (const s of stale.rows) {
+      await this.pool.tx(async (tx) => {
+        const t = await this.lock(tx, s.id);
+        if (t.status === 'OPEN') await this.transition(tx, t, 'CANCELLED', 'template_retired', 'system');
+      });
     }
   }
 
@@ -633,23 +683,22 @@ export class TournamentService {
     );
   }
 
-  private async startGame(tx: Connection, t: TournamentRow, m: MatchRow, gameNo: 1 | 2 | 3, aWhite: boolean, notes: Notes, startAt: Date, armageddon = false): Promise<void> {
+  private async startGame(tx: Connection, t: TournamentRow, m: MatchRow, gameNo: number, aWhite: boolean, notes: Notes, startAt: Date): Promise<void> {
     const existing = await this.games.summariesForMatches(tx, [m.id]);
     if (existing.some((g) => g.gameNo === gameNo)) return;
     const a = m.player_a as string;
     const b = m.player_b as string;
-    const tc = parseTimeControl(t.template.time_control);
-    const clocks = armageddon ? armageddonClocks(tc) : null;
+    // Beraberlikten sonraki tekrar oyunları 1 dakikalık ve rating'e işlenmez.
+    const tiebreak = gameNo > 1;
     const gameId = await this.games.createGame(tx, {
       kind: 'tournament',
       matchId: m.id,
       gameNo,
       whiteId: aWhite ? a : b,
       blackId: aWhite ? b : a,
-      timeControl: t.template.time_control,
-      ...(clocks ? { whiteMs: clocks.whiteMs, blackMs: clocks.blackMs, incrementMs: clocks.incrementMs } : {}),
-      armageddon,
-      rated: true,
+      timeControl: tiebreak ? TIEBREAK_TIME_CONTROL : t.template.time_control,
+      armageddon: false,
+      rated: !tiebreak,
       paid: t.template.entry_fee_cents > 0,
       startAt,
     });
@@ -663,7 +712,7 @@ export class TournamentService {
           matchId: m.id,
           gameId,
           gameNo,
-          armageddon,
+          tiebreak,
           color,
           round: roundName(m.round_no, rounds),
           startAt: startAt.toISOString(),
@@ -906,7 +955,7 @@ export class TournamentService {
     if (!fee) return [];
     const split = splitGross(fee, t.capacity, t.template.rake_bps);
     const scheme: readonly PrizeGroup[] = schemeFor(t.capacity, t.template.prize_scheme);
-    const table = scheme.map((g) => ({ rank: g.rank, count: g.count, cents: Math.floor((split.poolCents * g.bpsEach) / 10_000) }));
+    const table = scheme.map((g) => ({ rank: g.rank, count: g.count, cents: shareCents(split.poolCents, g) }));
     const rest = split.poolCents - table.reduce((s, g) => s + g.count * g.cents, 0);
     (table[0] as { cents: number }).cents += rest; // K4
     return table;
@@ -933,19 +982,17 @@ export class TournamentService {
     const verdict = judgeMatch(outcomes);
     let a = 0;
     let b = 0;
-    for (const o of outcomes.filter((x) => x.gameNo <= 2)) {
-      const white = o.result === '1-0' ? 1 : o.result === '0-1' ? 0 : 0.5;
-      a += o.aWasWhite ? white : 1 - white;
-      b += o.aWasWhite ? 1 - white : white;
+    for (const o of outcomes) {
+      const p = pointsFor(o);
+      a += p.a;
+      b += p.b;
     }
     await tx.query('UPDATE matches SET score_a = $2, score_b = $3, updated_at = now() WHERE id = $1', [m.id, a, b]);
-    const breakAt = new Date(Date.now() + t.template.break_seconds * 1000);
 
-    if (verdict.kind === 'next-game') {
-      await this.startGame(tx, t, m, 2, false, notes, breakAt);
-    } else if (verdict.kind === 'armageddon') {
-      // K5: Armageddon rengi sunucuda rastgele atanır ve oyun kaydında saklanır.
-      await this.startGame(tx, t, m, 3, randomInt(2) === 0, notes, breakAt, true);
+    if (verdict.kind === 'tiebreak') {
+      // Beraberlik: kısa bir aradan sonra 1 dakikalık tekrar oyunu, renkler değişir.
+      const pauseMs = Math.min(t.template.break_seconds, 15) * 1000;
+      await this.startGame(tx, t, m, verdict.gameNo, verdict.aWhite, notes, new Date(Date.now() + pauseMs));
     } else {
       const winner = verdict.winner === 'a' ? m.player_a : m.player_b;
       const loser = verdict.winner === 'a' ? m.player_b : m.player_a;
@@ -1053,7 +1100,7 @@ export class TournamentService {
         decidedBy: m.decided_by,
         games: games
           .filter((g) => g.matchId === m.id)
-          .map((g) => ({ id: g.id, gameNo: g.gameNo, status: g.status, result: g.result, reason: g.reason, whiteId: g.whiteId, armageddon: g.armageddon, startAt: g.startAt })),
+          .map((g) => ({ id: g.id, gameNo: g.gameNo, status: g.status, result: g.result, reason: g.reason, whiteId: g.whiteId, tiebreak: g.gameNo > 1, startAt: g.startAt })),
       })),
     };
   }
