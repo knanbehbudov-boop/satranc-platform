@@ -35,9 +35,12 @@ import { WalletService, type PayoutMethod } from './modules/wallet/service.ts';
 import { ReviewService } from './modules/review/service.ts';
 import { AssistantService, MessagesApiProvider } from './modules/assistant/service.ts';
 import { NotificationService } from './modules/notify/service.ts';
+import { PlacementService } from './modules/rating/placement.ts';
+import { GeoService } from './modules/geo/service.ts';
 import { RawResponse } from './infra/http/router.ts';
 import { RULES } from './infra/http/ratelimit.ts';
 import { notFound } from './infra/errors.ts';
+import { asLocale, emailText } from './infra/i18n.ts';
 
 export const WEB_DIR = join(import.meta.dirname, '..', '..', '..', 'apps', 'web', 'public');
 
@@ -59,6 +62,8 @@ export interface App {
   reviews: ReviewService;
   assistant: AssistantService;
   notifications: NotificationService;
+  placement: PlacementService;
+  geo: GeoService;
   flags: FlagService;
   analysis: AnalysisService;
   fairplay: FairPlayService;
@@ -98,7 +103,12 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     await pool.query('SELECT 1');
     return { ok: true, ws: wss.size, db: pool.stats };
   });
-  identityRoutes(router, identity, cfg);
+  const geo = new GeoService({ pool, cfg, logger: logger.child({ part: 'geo' }) });
+  identityRoutes(router, identity, cfg, geo);
+  router.post('/v1/me/locale', async (ctx) => {
+    const b = parse({ locale: { type: 'string', pattern: /^(tr|en|ru)$/ } }, ctx.body);
+    return identity.setLocale(ctx.requireUser().id, b.locale);
+  });
 
   const games = new GameService({
     pool,
@@ -139,6 +149,16 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     return bots.createGame(user.id, b as { level: string; color: 'white' | 'black' | 'random'; timeControl: string });
   });
   router.get('/v1/me/ratings', async (ctx) => ({ ratings: await ratings.ratingsOf(ctx.requireUser().id) }));
+  // ---- K47 seviye belirleme ----
+  const placement = new PlacementService({ pool, bots, hub });
+  events.subscribe('placement', ['game.ended'], placement.onGameEnded);
+  router.get('/v1/me/placement', async (ctx) => placement.status(ctx.requireUser().id));
+  router.post('/v1/me/placement/next', async (ctx) => {
+    const u = ctx.requireUser();
+    ctx.limit(`placement:${u.id}`, { capacity: 30, refillPerSec: 0.5 });
+    ctx.status = 201;
+    return placement.next(u.id);
+  });
   router.get('/v1/users/:id', async (ctx) => {
     if (!isUuid(ctx.params.id)) throw notFound('USER_NOT_FOUND', 'Kullanıcı bulunamadı');
     const prof = (await identity.publicProfiles([ctx.params.id as string])).get(ctx.params.id as string);
@@ -168,7 +188,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       apiBase: cfg.stripeApiBase,
     });
   }
-  const payments = new PaymentService({ pool, logger: logger.child({ part: 'payments' }), provider, ledger, identity });
+  const payments = new PaymentService({ pool, logger: logger.child({ part: 'payments' }), provider, ledger, identity, geo });
   router.post('/v1/webhooks/psp', async (ctx) => {
     const r = await payments.handleWebhook(ctx.rawBody, ctx.req.headers);
     return { received: true, duplicate: r.duplicate };
@@ -187,6 +207,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     const u = ctx.requireUser();
     ctx.limit(`deposit:${u.id}`, RULES.join);
     const b = parse({ amountCents: { type: 'int', min: 1, max: 10_000_000 }, key: { type: 'string', min: 8, max: 64, optional: true } }, ctx.body);
+    await geo.assertAllowed(ctx, 'deposit', { userId: u.id, roles: u.roles });
     return wallet.deposit(u.id, b.amountCents, b.key ?? null);
   });
   router.get('/v1/me/wallet/quote', async (ctx) => {
@@ -236,6 +257,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   events.subscribe('tournament', ['game.ended'], tournaments.onGameEnded);
   events.subscribe('tournament-payments', ['payment.succeeded', 'payment.failed'], (ev, tx, hooks) =>
     ev.topic === 'payment.succeeded' ? tournaments.onPaymentSucceeded(ev, tx, hooks) : tournaments.onPaymentFailed(ev, tx, hooks));
+  events.subscribe('tournament-payment-blocked', ['payment.blocked'], tournaments.onPaymentBlocked);
   events.subscribe('settlement', ['tournament.finished'], tournaments.onTournamentFinished);
 
   // ---- M4b analiz ve M10 adil oyun ----
@@ -265,9 +287,10 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   const unsubscribePage = async (ctx: { query: URLSearchParams }) => {
     const u = ctx.query.get('u') ?? '';
     const ok = isUuid(u) && (await notifications.unsubscribeByLink(u, ctx.query.get('t') ?? ''));
-    const msg = ok ? 'Yeni turnuva duyurularından çıktın. Turnuvalarına ait bildirimler (kayıt, başlama) gelmeye devam eder.' : 'Bağlantı geçersiz.';
+    const l = ok ? asLocale((await pool.query<{ locale: string }>('SELECT locale FROM users WHERE id = $1', [u])).rows[0]?.locale) : 'tr';
+    const tx = emailText(l).unsubscribed;
     return new RawResponse('text/html; charset=utf-8',
-      `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bildirimler</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><h1>Bildirimler</h1><p>${msg}</p><p><a href="/">Siteye dön</a></p></body>`,
+      `<!doctype html><html lang="${l}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${tx.title}</title><body style="font-family:system-ui;max-width:520px;margin:48px auto;padding:0 16px"><h1>${tx.title}</h1><p>${ok ? tx.ok : tx.bad}</p><p><a href="/">${tx.back}</a></p></body></html>`,
       ok ? 200 : 400);
   };
   router.get('/v1/notifications/unsubscribe', unsubscribePage);
@@ -328,6 +351,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     ctx.limit(`join:${u.id}`, RULES.join);
     const body = (ctx.body ?? {}) as { useWallet?: unknown };
     const useWallet = typeof body.useWallet === 'boolean' ? body.useWallet : undefined;
+    await geo.assertAllowed(ctx, 'join', { userId: u.id, roles: u.roles });
     return tournaments.join(u.id, tid(ctx), { ip: ctx.ip, deviceKey: ctx.deviceKey, ...(useWallet === undefined ? {} : { useWallet }) });
   });
   router.post('/v1/tournaments/:id/leave', async (ctx) => {
@@ -337,6 +361,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
   router.post('/v1/tournaments/:id/pay', async (ctx) => {
     const u = ctx.requireUser();
     ctx.limit(`join:${u.id}`, RULES.join);
+    await geo.assertAllowed(ctx, 'pay', { userId: u.id, roles: u.roles });
     return tournaments.resumePayment(u.id, tid(ctx));
   });
   router.get('/v1/me/wallet', async (ctx) => {
@@ -418,6 +443,8 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
     reviews,
     assistant,
     notifications,
+    placement,
+    geo,
     flags,
     analysis,
     fairplay,
@@ -433,6 +460,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       sandbox?.start();
       analysis.start();
       notifications.start();
+      geo.start();
       await games.start();
       await tournaments.start();
       await demo?.start().catch((e) => logger.error('Demo botları başlatılamadı', { error: e }));
@@ -444,6 +472,7 @@ export async function createApp(cfg: Config, opts: { logger?: Logger; runMigrati
       sandbox?.stop();
       analysis.stop();
       notifications.stop();
+      geo.stop();
       tournaments.stop();
       demo?.stop();
       games.stop();

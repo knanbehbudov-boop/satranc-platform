@@ -42,6 +42,8 @@ services:
         sync: false               # gönderen Gmail adresi
       - key: SMTP_PASS
         sync: false               # Gmail "uygulama şifresi" (normal şifre değil)
+      - key: GEO_BLOCK_MODE
+        value: log                # Azerbaycan engeli testte yalnız kaydedilir; gerçek yayında "enforce"
 databases:
   - name: satranc-db
     plan: free

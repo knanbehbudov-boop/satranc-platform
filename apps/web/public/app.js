@@ -52,17 +52,26 @@
 
   /** Tutarlar her yerde tamsayı cent; gösterimde biçimlenir. */
   function money(cents, cur) {
-    try { return new Intl.NumberFormat('tr-TR', { style: 'currency', currency: cur || 'USD' }).format((cents || 0) / 100); }
+    try { return new Intl.NumberFormat(I18N.intl, { style: 'currency', currency: cur || 'USD' }).format((cents || 0) / 100); }
     catch { return `${((cents || 0) / 100).toFixed(2)} ${cur}`; }
   }
-  const fmtTime = (iso) => new Date(iso).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const fmtTime = (iso) => new Date(iso).toLocaleString(I18N.intl, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const rankLabel = (rank, count) => (count > 1 ? `${rank}.–${rank + count - 1}.` : `${rank}.`);
   const ORPHAN_REASON = {
     seat_unavailable: 'Koltuğun artık yoktu (rezervasyon süresi dolmuş olabilir)',
     tournament_not_open: 'Turnuva kayıtları kapanmıştı',
     amount_mismatch: 'Ödenen tutar beklenenle uyuşmadı',
+    card_country_blocked: 'Bu kartla ödeme kabul edilmiyor',
   };
   const PAY_FAIL = { card_declined: 'Kart reddedildi', insufficient_funds: 'Yetersiz bakiye', authentication_failed: '3D Secure doğrulanamadı' };
+
+  /** K47: sıradaki seviye belirleme oyununu açar. */
+  async function placementNext() {
+    try {
+      const r = await api('POST', '/v1/me/placement/next', {});
+      location.hash = `#/oyun/${r.gameId}`;
+    } catch (e) { toast(e.message); }
+  }
 
   /** Kullanıcının harcanabilir bakiyesi (yüklenen + çekilebilir ödül), cent. */
   async function spendableCents(cur) {
@@ -166,6 +175,7 @@
 
   function adopt(r) {
     hint.set(true);
+    syncLocale(r.user);
     session.token = r.accessToken;
     session.user = r.user;
     clearTimeout(session.refreshTimer);
@@ -173,6 +183,29 @@
     ws.authenticate();
     renderNav();
   }
+
+  /**
+   * K48: dil tercihi. Cihazda seçilmiş dil varsa hesaba yazılır (e-postalar o dilde gelir);
+   * yoksa hesabın dili cihaza uygulanır.
+   */
+  let localeSynced = false;
+  function syncLocale(user) {
+    if (!user?.locale || localeSynced) return;
+    localeSynced = true;
+    if (I18N.explicit || user.locale === I18N.lang) {
+      if (user.locale !== I18N.lang) void api('POST', '/v1/me/locale', { locale: I18N.lang }).catch(() => undefined);
+    } else I18N.setLang(user.locale);
+  }
+  async function changeLang(l) {
+    if (session.token) await api('POST', '/v1/me/locale', { locale: l }).catch(() => undefined);
+    I18N.setLang(l);
+  }
+  (function langPicker() {
+    const sel = document.getElementById('lang-select');
+    if (!sel) return;
+    sel.replaceChildren(...I18N.supported.map((l) => el('option', { value: l, selected: l === I18N.lang }, I18N.names[l])));
+    sel.addEventListener('change', () => void changeLang(sel.value));
+  })();
 
   async function refresh() {
     try {
@@ -275,6 +308,11 @@
       if (!location.hash.startsWith(`#/oyun/${m.gameId}`)) location.hash = `#/oyun/${m.gameId}`;
     } else if (m.type === 'payment.confirmed') {
       if (!m.fromWallet) toast('Ödemen alındı, koltuğun onaylandı.', { href: `#/turnuva/${m.tournamentId}`, text: 'Turnuvaya git' });
+    } else if (m.type === 'placement.step') {
+      const box = el('div', {}, `Seviye belirleme: ${m.step}/${m.total} oyun tamam. `, el('button', { class: 'btn small', type: 'button', onclick: () => void placementNext() }, 'Sıradaki oyun'));
+      toast(box);
+    } else if (m.type === 'placement.done') {
+      toast(`Seviyen belirlendi: başlangıç puanın yaklaşık ${m.estimate}. Gerçek maçlarla kesinleşir.`);
     } else if (m.type === 'wallet.deposited') {
       toast(`${money(m.amountCents, 'USD')} bakiyene yüklendi.`, { href: '#/cuzdan', text: 'Cüzdan' });
     } else if (m.type === 'withdrawal.paid') {
@@ -343,9 +381,11 @@
 
   // ---- giriş ve kayıt ----------------------------------------------------------
 
+  const FIELD_NAMES = { email: 'E-posta', password: 'Şifre', displayName: 'Kullanıcı adı', birthDate: 'Doğum tarihi', countryCode: 'Ülke' };
   function fieldError(form, e) {
     const box = form.querySelector('.form-error');
-    box.textContent = e.message + (e.details?.fields ? `: ${Object.entries(e.details.fields).map(([k, v]) => `${k} ${v}`).join(', ')}` : '');
+    const fields = e.details?.fields ? Object.entries(e.details.fields).map(([k, v]) => `${I18N.t(FIELD_NAMES[k] || k)} ${I18N.t(String(v))}`).join(', ') : '';
+    box.textContent = I18N.t(e.message) + (fields ? `: ${fields}` : '');
     box.hidden = false;
   }
 
@@ -368,7 +408,7 @@
     mount(el('section', { class: 'card narrow' }, el('h1', {}, 'Giriş'), form, el('p', { class: 'small muted' }, 'Hesabın yok mu? ', el('a', { href: '#/kayit' }, 'Kayıt ol'))));
   }
 
-  const COUNTRIES = [['TR', 'Türkiye'], ['AZ', 'Azerbaycan'], ['GB', 'Birleşik Krallık'], ['DE', 'Almanya'], ['NL', 'Hollanda'], ['FR', 'Fransa'], ['US', 'ABD'], ['ES', 'İspanya'], ['IT', 'İtalya'], ['GE', 'Gürcistan'], ['KZ', 'Kazakistan'], ['UA', 'Ukrayna']];
+  const COUNTRIES = [['TR', 'Türkiye'], ['GB', 'Birleşik Krallık'], ['DE', 'Almanya'], ['NL', 'Hollanda'], ['FR', 'Fransa'], ['US', 'ABD'], ['ES', 'İspanya'], ['IT', 'İtalya'], ['GE', 'Gürcistan'], ['KZ', 'Kazakistan'], ['UA', 'Ukrayna'], ['RU', 'Rusya']];
 
   async function devVerify(email) {
     const mail = await api('GET', `/v1/dev/mailbox?email=${encodeURIComponent(email)}`);
@@ -405,6 +445,7 @@
           countryCode: form.querySelector('#reg-country').value,
           acceptTos: form.querySelector('#reg-tos').checked,
           newTournamentsEmail: form.querySelector('#reg-news').checked,
+          locale: I18N.lang,
         });
         const done = el('section', { class: 'card narrow-wide' },
           el('h1', {}, 'Hesabın oluşturuldu'),
@@ -544,6 +585,16 @@
       if (live.games.length) {
         right.append(el('section', { class: 'card' }, el('p', { class: 'msg ok' }, 'Devam eden bir oyunun var.'), el('a', { class: 'btn primary', href: `#/oyun/${live.games[0]}` }, 'Oyununa dön')));
       }
+      const pl = await api('GET', '/v1/me/placement').catch(() => null);
+      if (pl && (pl.needed || pl.status === 'active')) {
+        right.append(el('section', { class: 'card', id: 'placement-card' },
+          el('h2', {}, 'Seviyeni belirle'),
+          el('p', { class: 'small' }, `Bota karşı ${pl.total} kısa oyun oyna; bot senin oyununa göre güçlenir ya da zayıflar. Sonunda başlangıç puanın belirlenir ve sana uygun rakiplerle eşleşirsin.`),
+          pl.status === 'active' ? el('p', { class: 'small muted' }, `${pl.step}/${pl.total} oyun tamamlandı.`) : null,
+          el('button', { class: 'btn primary', type: 'button', id: 'placement-next', onclick: () => void placementNext() },
+            pl.status === 'active' ? `Sıradaki oyun (${pl.step + 1}/${pl.total})` : 'Başla'),
+        ));
+      }
       const r = await api('GET', '/v1/me/ratings');
       right.append(el('section', { class: 'card' },
         el('h2', {}, 'Rating'),
@@ -641,7 +692,7 @@
           return el('div', { class: 'acc-row', dataset: { color } },
             el('div', { class: 'spread' },
               el('span', { class: 'pname' }, `${color === 'w' ? '○' : '●'} ${s.state.players[color].name || 'Bot'}${color === s.myColor ? ' (sen)' : ''}`),
-              el('b', { class: 'acc mono' }, p.accuracy === null ? '—' : `%${p.accuracy.toLocaleString('tr-TR')}`)),
+              el('b', { class: 'acc mono' }, p.accuracy === null ? '—' : `%${p.accuracy.toLocaleString(I18N.intl)}`)),
             el('div', { class: 'acc-bar', 'aria-hidden': 'true' }, CLS.map(([k]) => p.counts[k] ? el('i', { class: `c-${k}`, style: null, dataset: { w: Math.round((p.counts[k] / total) * 100) } }) : null)),
             el('div', { class: 'acc-legend small' }, CLS.map(([k, label]) => el('span', { class: `c-${k}` }, `${label} ${p.counts[k]} (%${Math.round((p.counts[k] / total) * 100)})`))),
           );
@@ -759,7 +810,7 @@
         if (last && (last.from === sq || last.to === sq)) cls.push('last');
         if (s.selected === sq) cls.push('selected');
         if (checkSq === sq) cls.push('check');
-        return el('button', { type: 'button', class: cls.join(' '), dataset: { square: sq }, 'aria-label': p ? `${sq} ${p.color === 'w' ? 'beyaz' : 'siyah'} ${PIECE_NAME[p.type]}` : sq, onclick: () => onSquare(sq) },
+        return el('button', { type: 'button', class: cls.join(' '), dataset: { square: sq }, 'aria-label': p ? `${sq} ${I18N.t(p.color === 'w' ? 'beyaz' : 'siyah')} ${I18N.t(PIECE_NAME[p.type])}` : sq, onclick: () => onSquare(sq) },
           p ? pieceImg(p.color, p.type) : null,
           targets.has(sq) ? el('span', { class: p || targets.get(sq).flag === 'e' ? 'target capture' : 'target' }) : null,
           idx % 8 === 0 ? el('span', { class: 'coord rank' }, sq[1]) : null,
@@ -1055,7 +1106,7 @@
           el('p', { class: 'small muted' },
             d.settlement
               ? `Toplam giriş ${money(d.settlement.grossCents, d.currency)} · sistem payı ${money(d.settlement.rakeCents, d.currency)} · ödül havuzu ${money(d.settlement.prizePoolCents, d.currency)}. Ödüller güvenlik incelemesi için bekletilir, sonra çekilebilir bakiyene geçer.`
-              : `Kontenjan dolarsa: ${d.capacity} × ${money(d.entryFeeCents, d.currency)}, sistem payı %${(d.rakeBps / 100).toLocaleString('tr-TR')}. Kuruş artığı şampiyona eklenir.`),
+              : `Kontenjan dolarsa: ${d.capacity} × ${money(d.entryFeeCents, d.currency)}, sistem payı %${(d.rakeBps / 100).toLocaleString(I18N.intl)}. Kuruş artığı şampiyona eklenir.`),
         );
       }
 
@@ -1360,6 +1411,10 @@
       el('h1', {}, 'Ayarlar'),
       el('section', { class: 'card' }, el('h2', {}, 'Hesap'),
         el('p', {}, el('b', {}, session.user.displayName), el('span', { class: 'muted' }, ` · ${session.user.email}`))),
+      el('section', { class: 'card' }, el('h2', {}, 'Dil'),
+        el('p', { class: 'small muted' }, 'Arayüz ve e-postalar bu dilde gelir.'),
+        el('select', { id: 'settings-lang', translate: 'no', onchange: (ev) => void changeLang(ev.target.value) },
+          I18N.supported.map((l) => el('option', { value: l, selected: l === I18N.lang }, I18N.names[l])))),
       el('section', { class: 'card' }, el('h2', {}, 'Telefon bildirimleri'),
         el('p', { class: 'small muted' }, 'Kayıtlı olduğun turnuva dolup başlarken ve sıradaki maçın başlarken bildirim alırsın.'),
         pushState, pushBtn),
@@ -1384,7 +1439,7 @@
     const quick = el('div', { class: 'quick' }, (gameId
       ? ['Bu oyunda nerede hata yaptım?', 'Bu oyundan ne öğrenmeliyim?', 'Açılışım nasıldı?']
       : ['Para nasıl çekerim?', 'Beraberlikte ne olur?', 'Rakibimi şikayet etmek istiyorum']
-    ).map((q) => el('button', { class: 'btn small', type: 'button', onclick: () => { input.value = q; form.requestSubmit(); } }, q)));
+    ).map((q) => el('button', { class: 'btn small', type: 'button', onclick: () => { input.value = I18N.t(q); form.requestSubmit(); } }, q)));
     mount(el('section', { class: 'card narrow-wide', id: 'assistant' },
       el('div', { class: 'spread' }, el('h1', {}, 'Satranç Asistanı'), gameId ? el('a', { class: 'btn small', href: `#/oyun/${gameId}` }, 'Oyuna dön') : null),
       el('p', { class: 'small muted' }, gameId
@@ -1393,11 +1448,12 @@
       chat, quick, form,
     ));
     let st = null;
-    const bubble = (role, text) => el('div', { class: `bubble ${role}` }, text);
+    // Mesaj içeriği çevrilmez (asistan zaten kullanıcının dilinde yazar).
+    const bubble = (role, text) => el('div', { class: `bubble ${role}`, translate: 'no' }, text);
     async function load() {
       st = await api('GET', '/v1/assistant');
       const mine = st.messages.filter((m) => (gameId ? m.gameId === gameId : m.mode === 'support'));
-      chat.replaceChildren(...(mine.length ? mine.map((m) => bubble(m.role, m.content)) : [bubble('assistant', gameId ? 'Merhaba! Bu oyununla ilgili ne sormak istersin?' : 'Merhaba! Ben Satranç Asistanı. Nasıl yardımcı olabilirim?')]));
+      chat.replaceChildren(...(mine.length ? mine.map((m) => bubble(m.role, m.content)) : [bubble('assistant', I18N.t(gameId ? 'Merhaba! Bu oyununla ilgili ne sormak istersin?' : 'Merhaba! Ben Satranç Asistanı. Nasıl yardımcı olabilirim?'))]));
       chat.scrollTop = chat.scrollHeight;
       const blocked = !st.enabled ? 'Asistan şu anda kullanılamıyor.' : st.locked ? LOCK[st.locked] : st.remainingToday <= 0 ? 'Bugünkü soru hakkın doldu; yarın tekrar sorabilirsin.' : null;
       info.textContent = blocked || `Bugün kalan soru hakkın: ${st.remainingToday}/${st.limit}`;
@@ -1415,7 +1471,7 @@
       chat.scrollTop = chat.scrollHeight;
       sendBtn.disabled = true;
       try {
-        const r = await api('POST', '/v1/assistant/messages', { text, ...(gameId ? { gameId } : {}), locale: 'tr' });
+        const r = await api('POST', '/v1/assistant/messages', { text, ...(gameId ? { gameId } : {}), locale: I18N.lang });
         wait.textContent = r.reply;
         if (r.actions?.some((a) => a.type === 'complaint')) toast('Şikayetin inceleme ekibine iletildi.');
         info.textContent = `Bugün kalan soru hakkın: ${r.remainingToday}/${st.limit}`;

@@ -30,7 +30,7 @@ env.app.bots.humanDelay = false;
 const browser = await playwright.chromium.launch();
 const errors = [];
 try {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'tr-TR' });
   await ctx.route('https://fonts.googleapis.com/**', (r) => r.abort());
   await ctx.route('https://fonts.gstatic.com/**', (r) => r.abort());
   const page = await ctx.newPage();
@@ -47,7 +47,7 @@ try {
   await page.fill('#reg-name', name);
   await page.fill('#reg-password', password);
   await page.fill('#reg-birth', '1988-04-12');
-  await page.selectOption('#reg-country', 'AZ');
+  await page.selectOption('#reg-country', 'TR');
   await page.check('#reg-tos');
   await page.click('#register-form button[type=submit]');
   await page.click('#dev-verify');
@@ -59,6 +59,8 @@ try {
   await page.reload();
   await page.waitForSelector('#tournament-list .trow');
   check((await page.textContent('#nav')).includes(name), 'Sayfa yenilenince oturum korunuyor (httpOnly çerez)');
+  await page.waitForSelector('#placement-card');
+  check((await page.textContent('#placement-card')).includes('Seviyeni belirle'), 'Yeni oyuncuya "Seviyeni belirle" kartı gösteriliyor (K47)');
 
   // ---- 2. Bot oyunu ----
   await page.selectOption('#bot-level', 'baslangic');
@@ -107,6 +109,18 @@ try {
   check(optIn === true, 'Ayarlar: kutucuk işaretlenince izin kaydedildi');
   check((await page.textContent('#push-state')).length > 0, 'Ayarlar: telefon bildirimi durumu görünüyor');
   if (shots) await page.screenshot({ path: join(shots, 'web-ayarlar.png'), fullPage: true });
+
+  // ---- 2c. Dil (K48): İngilizceye geç, hesaba kaydedilsin, Türkçeye dön ----
+  await Promise.all([page.waitForNavigation(), page.selectOption('#lang-select', 'en')]);
+  await page.waitForSelector('#settings #settings-lang');
+  await page.waitForFunction(() => document.querySelector('#nav')?.textContent.includes('Wallet'));
+  check((await page.textContent('#settings')).includes('Phone notifications'), 'Dil: İngilizceye geçince ayarlar sayfası İngilizce');
+  const savedLocale = (await env.app.pool.query('SELECT locale FROM users WHERE lower(email) = lower($1)', [email])).rows[0].locale;
+  check(savedLocale === 'en', `Dil: tercih hesaba kaydedildi (${savedLocale})`);
+  if (shots) await page.screenshot({ path: join(shots, 'web-ingilizce.png'), fullPage: true });
+  await Promise.all([page.waitForNavigation(), page.selectOption('#settings-lang', 'tr')]);
+  await page.waitForFunction(() => document.querySelector('#nav')?.textContent.includes('Cüzdan'));
+  check(true, 'Dil: ayarlardan Türkçeye geri dönüldü');
 
   // ---- 3. Turnuva ----
   const code = uniqueName('e2e').toLowerCase();
@@ -294,7 +308,7 @@ try {
   check((await page.textContent('#audit-table')).includes('approval.execute'), 'Denetim kaydında onay görünüyor');
 
   // ---- 6. Telefon genişliği ----
-  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', locale: 'ru-RU' });
   await phone.route('https://fonts.googleapis.com/**', (r) => r.abort());
   await phone.route('https://fonts.gstatic.com/**', (r) => r.abort());
   const pp = await phone.newPage();
@@ -312,6 +326,10 @@ try {
   const overflow3 = await pp.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(overflow3 <= 0, `Telefonda cüzdan sayfası taşmıyor (${overflow3}px)`);
   if (shots) await pp.screenshot({ path: join(shots, 'web-telefon.png'), fullPage: false });
+  await pp.goto(env.base + '/#/');
+  await pp.waitForFunction(() => document.body.textContent.includes('Платные турниры'));
+  check((await pp.textContent('#nav')).includes('Регистрация'), 'Dil: Rusça tarayıcıda lobi ve menü Rusça');
+  if (shots) await pp.screenshot({ path: join(shots, 'web-rusca.png'), fullPage: false });
 
   check(errors.length === 0, `Tarayıcıda JavaScript hatası yok${errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''}`);
   for (const b of bots) b.close();

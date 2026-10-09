@@ -52,7 +52,9 @@ button, input, select { font: inherit; color: inherit; }
 .nav a:not(.btn):hover { color: var(--strong); }
 .nav .who { color: var(--strong); font-weight: 600; }
 .conn { text-align: center; font-size: 13px; padding: 6px; background: var(--crit-soft); color: var(--crit); }
-.foot { text-align: center; color: var(--muted); font-size: 12px; padding: 16px; }
+.foot { text-align: center; color: var(--muted); font-size: 12px; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.lang-pick { display: inline-flex; align-items: center; gap: 6px; }
+.lang-pick select { width: auto; padding: 4px 8px; font-size: 13px; }
 
 h1 { font: 600 clamp(22px, 3vw, 28px)/1.2 var(--font-body); margin: 0; letter-spacing: -0.01em; color: var(--strong); text-wrap: balance; }
 h2 { font: 600 13px/1.2 var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0; }

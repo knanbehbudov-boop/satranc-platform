@@ -135,7 +135,8 @@ export class StripePsp implements PaymentProvider {
       case 'payment_intent.succeeded':
         return {
           id: ev.id, type: 'payment.succeeded', providerType: ev.type, ref: o.id, paymentId: o.metadata?.paymentId,
-          amountCents: o.amount_received, currency: cur, cardLast4: o.payment_method_details?.card?.last4, raw: ev,
+          amountCents: o.amount_received, currency: cur, cardLast4: o.payment_method_details?.card?.last4,
+          cardCountry: (o.payment_method_details?.card?.country ?? o.latest_charge?.payment_method_details?.card?.country)?.toUpperCase(), raw: ev,
         };
       case 'payment_intent.payment_failed':
         return {

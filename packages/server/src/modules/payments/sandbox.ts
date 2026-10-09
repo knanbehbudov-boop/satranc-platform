@@ -54,6 +54,9 @@ interface IntentRow {
   failure_reason: string | null;
 }
 
+/** Ülkesi belli test kartları (K49). */
+export const SANDBOX_CARD_COUNTRY: Record<string, string> = { '4000000310000007': 'AZ' };
+
 function luhn(num: string): boolean {
   let sum = 0;
   let alt = false;
@@ -140,7 +143,7 @@ export class SandboxPsp implements PaymentProvider {
     const o = ev.data?.object ?? {};
     switch (ev.type) {
       case 'payment_intent.succeeded':
-        return { id: ev.id, type: 'payment.succeeded', providerType: ev.type, ref: o.id, paymentId: o.metadata?.paymentId, amountCents: o.amount_received, feeCents: o.fee, currency: o.currency, cardLast4: o.card_last4, raw: ev };
+        return { id: ev.id, type: 'payment.succeeded', providerType: ev.type, ref: o.id, paymentId: o.metadata?.paymentId, amountCents: o.amount_received, feeCents: o.fee, currency: o.currency, cardLast4: o.card_last4, cardCountry: o.card_country ?? undefined, raw: ev };
       case 'payment_intent.payment_failed':
         return { id: ev.id, type: 'payment.failed', providerType: ev.type, ref: o.id, paymentId: o.metadata?.paymentId, failureReason: o.last_payment_error?.code ?? 'failed', raw: ev };
       case 'charge.refunded':
@@ -239,7 +242,7 @@ export class SandboxPsp implements PaymentProvider {
     return row;
   }
 
-  private async succeed(row: IntentRow, last4: string): Promise<void> {
+  private async succeed(row: IntentRow, last4: string, country: string | null = null): Promise<void> {
     await this.pool.tx(async (tx) => {
       const fee = estimateFee(row.amount_cents);
       const r = await tx.query(
@@ -249,7 +252,7 @@ export class SandboxPsp implements PaymentProvider {
       );
       if (!r.rowCount) return;
       await this.emit(tx, 'payment_intent.succeeded', {
-        object: { id: row.id, amount_received: row.amount_cents, currency: row.currency, fee, card_last4: last4, metadata: row.metadata },
+        object: { id: row.id, amount_received: row.amount_cents, currency: row.currency, fee, card_last4: last4, card_country: country, metadata: row.metadata },
       });
     });
   }
@@ -319,7 +322,8 @@ export class SandboxPsp implements PaymentProvider {
         await this.pool.query(`UPDATE psp_sandbox_intents SET status = 'requires_action', card_last4 = $2, updated_at = now() WHERE id = $1`, [row.id, last4]);
         return { status: 'requires_action' };
       }
-      await this.succeed(row, last4);
+      // K49 test kartı: Azerbaycan'da çıkarılmış kart gibi davranır (ödeme alınır, platform iade eder).
+      await this.succeed(row, last4, SANDBOX_CARD_COUNTRY[card] ?? null);
       return { status: 'succeeded', returnUrl: row.metadata.returnUrl };
     });
     router.post('/sandbox-psp/v1/checkout/:id/3ds', async (ctx) => {

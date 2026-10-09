@@ -16,12 +16,12 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Config } from '../../config.ts';
 import type { Pool, Queryable } from '../../infra/db/pg.ts';
 import { badRequest } from '../../infra/errors.ts';
+import { asLocale, emailText, localizeRound, localizeTournamentName, type EmailTexts, type Locale } from '../../infra/i18n.ts';
 import type { Logger } from '../../infra/log.ts';
 import { sendMail, type MailMessage, type SmtpOptions } from '../../infra/mail/smtp.ts';
 import { generateVapidKeys, sendPush, type VapidKeys } from '../../infra/push/webpush.ts';
 import type { WsHub } from '../../infra/ws/hub.ts';
 
-const fmtUsd = (cents: number) => `${(cents / 100).toFixed(2).replace('.', ',')} $`;
 const MAX_MAIL_ATTEMPTS = 6;
 
 export interface PushPayload {
@@ -159,13 +159,23 @@ export class NotificationService {
 
   // ---- gönderim ---------------------------------------------------------------------
 
-  async email(q: Queryable, userId: string, template: string, subject: string, body: string, data: Record<string, unknown> = {}) {
-    const u = (await q.query<{ email: string; display_name: string; closed_at: Date | null }>('SELECT email, display_name, closed_at FROM users WHERE id = $1', [userId])).rows[0];
+  /** E-postayı kullanıcının dilinde kuyruğa yazar (K48). */
+  async email(q: Queryable, userId: string, template: string, build: (t: EmailTexts, l: Locale) => { subject: string; body: string }, data: Record<string, unknown> = {}) {
+    const u = (await q.query<{ email: string; display_name: string; closed_at: Date | null; locale: string }>(
+      'SELECT email, display_name, closed_at, locale FROM users WHERE id = $1', [userId])).rows[0];
     if (!u || u.closed_at) return;
+    const l = asLocale(u.locale);
+    const t = emailText(l);
+    const m = build(t, l);
     await q.query(
       `INSERT INTO mail_outbox (to_email, template, subject, body, data) VALUES ($1, $2, $3, $4, $5)`,
-      [u.email, template, subject, `Merhaba ${u.display_name},\n\n${body}\n\n— Satranç Turnuvaları`, { userId, ...data }],
+      [u.email, template, m.subject, `${t.greeting(u.display_name)}\n\n${m.body}\n\n${t.signature}`, { userId, ...data }],
     );
+  }
+
+  private async localeOf(userId: string): Promise<Locale> {
+    const r = await this.pool.query<{ locale: string }>('SELECT locale FROM users WHERE id = $1', [userId]);
+    return asLocale(r.rows[0]?.locale);
   }
 
   async push(userId: string, payload: PushPayload): Promise<number> {
@@ -236,45 +246,48 @@ export class NotificationService {
   async onUserMessage(userId: string, m: { type?: string; [k: string]: unknown }): Promise<void> {
     switch (m.type) {
       case 'tournament.joined': {
-        const fee = Number(m.entryFeeCents ?? 0);
-        await this.email(this.pool, userId, 'tournament_joined', `Kaydın alındı: ${m.name}`,
-          `${m.name} turnuvasına kaydın alındı${fee ? ` (giriş ücreti ${fmtUsd(fee)})` : ''}.\n`
-          + `Turnuva ${m.capacity} kişi dolunca başlar. Dolduğunda sana telefon bildirimi gönderilir; "Hazırım" demek için ${m.readySeconds ?? 60} saniyen olur.\n\n`
-          + `Turnuva sayfası: ${this.link(`/turnuva/${m.tournamentId}`)}`,
-          { tournamentId: m.tournamentId });
+        const tLink = this.link(`/turnuva/${m.tournamentId}`);
+        await this.email(this.pool, userId, 'tournament_joined', (t, l) => t.tournamentJoined({
+          name: localizeTournamentName(String(m.name), l), feeCents: Number(m.entryFeeCents ?? 0), capacity: Number(m.capacity), readySeconds: Number(m.readySeconds ?? 60), link: tLink,
+        }), { tournamentId: m.tournamentId });
         return;
       }
       case 'tournament.readyCheck': {
-        await this.push(userId, { title: 'Turnuvan başlıyor!', body: `${m.readySeconds} saniye içinde "Hazırım" de.`, url: `/#/turnuva/${m.tournamentId}`, tag: `ready-${m.tournamentId}` });
+        const t = emailText(await this.localeOf(userId));
+        await this.push(userId, { title: t.push.readyTitle, body: t.push.readyBody(Number(m.readySeconds)), url: `/#/turnuva/${m.tournamentId}`, tag: `ready-${m.tournamentId}` });
         if (!this.hub.isUserOnline(userId)) {
-          await this.email(this.pool, userId, 'tournament_starting', 'Turnuvan başlıyor — hemen "Hazırım" de',
-            `Kayıtlı olduğun turnuva doldu ve başlıyor. ${m.readySeconds} saniye içinde "Hazırım" demezsen hükmen elenirsin.\n\n${this.link(`/turnuva/${m.tournamentId}`)}`,
-            { tournamentId: m.tournamentId });
+          const tLink = this.link(`/turnuva/${m.tournamentId}`);
+          await this.email(this.pool, userId, 'tournament_starting', (x) => x.tournamentStarting({ readySeconds: Number(m.readySeconds), link: tLink }), { tournamentId: m.tournamentId });
         }
         return;
       }
       case 'match.ready': {
+        const l = await this.localeOf(userId);
+        const t = emailText(l);
         const when = Math.max(0, Math.round((new Date(String(m.startAt)).getTime() - Date.now()) / 1000));
         await this.push(userId, {
-          title: m.tiebreak ? 'Tekrar oyunu başlıyor' : `${m.round} başlıyor`,
-          body: `${when > 1 ? `${when} sn sonra` : 'Şimdi'} · renk: ${m.color === 'w' ? 'beyaz' : 'siyah'}`,
+          title: m.tiebreak ? t.push.tiebreakTitle : t.push.roundStarting(localizeRound(String(m.round), l)),
+          body: t.push.matchBody(when, m.color === 'w'),
           url: `/#/oyun/${m.gameId}`,
           tag: `match-${m.matchId}`,
         });
         return;
       }
-      case 'prize.released':
-        await this.email(this.pool, userId, 'prize_released', 'Ödülün çekilebilir bakiyende',
-          `${fmtUsd(Number(m.cents))} ödülün incelemeden geçti ve çekilebilir bakiyene eklendi.\n\nCüzdan: ${this.link('/cuzdan')}`);
+      case 'prize.released': {
+        const link = this.link('/cuzdan');
+        await this.email(this.pool, userId, 'prize_released', (t) => t.prizeReleased({ cents: Number(m.cents), link }));
         return;
-      case 'withdrawal.paid':
-        await this.email(this.pool, userId, 'withdrawal_paid', 'Para çekme talebin ödendi',
-          `Para çekme talebin ödendi. Bankan veya ödeme sağlayıcın tarafından alınan komisyonlar platformumuza ait değildir.\n\nCüzdan: ${this.link('/cuzdan')}`);
+      }
+      case 'withdrawal.paid': {
+        const link = this.link('/cuzdan');
+        await this.email(this.pool, userId, 'withdrawal_paid', (t) => t.withdrawalPaid({ link }));
         return;
-      case 'withdrawal.rejected':
-        await this.email(this.pool, userId, 'withdrawal_rejected', 'Para çekme talebin reddedildi',
-          `Para çekme talebin reddedildi ve tutar bakiyene geri döndü. Ayrıntılar cüzdan sayfanda.\n\nCüzdan: ${this.link('/cuzdan')}`);
+      }
+      case 'withdrawal.rejected': {
+        const link = this.link('/cuzdan');
+        await this.email(this.pool, userId, 'withdrawal_rejected', (t) => t.withdrawalRejected({ link }));
         return;
+      }
       default:
     }
   }
@@ -306,13 +319,14 @@ export class NotificationService {
       );
       const f = fav.rows[0];
       const list = [...open.rows].sort((a, b) => Number(!!f && !(b.capacity === f.capacity && b.tc === f.tc)) - Number(!!f && !(a.capacity === f.capacity && a.tc === f.tc))).slice(0, 6);
-      const lines = list.map((t) => `• ${t.name} — ${t.joined}/${t.capacity} kayıtlı`);
+      const home = this.link('/');
+      const unsubscribe = this.unsubscribeUrl(u.id);
       await this.pool.tx(async (tx) => {
         const upd = await tx.query(`UPDATE users SET last_digest_at = now() WHERE id = $1 AND (last_digest_at IS NULL OR last_digest_at < now() - interval '20 hours')`, [u.id]);
         if (!upd.rowCount) return;
-        await this.email(tx, u.id, 'digest', 'Bugünün açık turnuvaları',
-          `Kayıt alan ücretli turnuvalar:\n${lines.join('\n')}\n\nKatılmak için: ${this.link('/')}\n\n`
-          + `Bu e-postayı yeni turnuvalardan haberdar olmak istediğin için alıyorsun. Almak istemiyorsan: ${this.unsubscribeUrl(u.id)}`);
+        await this.email(tx, u.id, 'digest', (t, l) => t.digest({
+          lines: list.map((x) => ({ name: localizeTournamentName(x.name, l), joined: x.joined, capacity: x.capacity })), link: home, unsubscribe,
+        }));
         n++;
       });
     }

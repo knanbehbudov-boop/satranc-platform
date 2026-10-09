@@ -90,6 +90,14 @@ export interface Config {
   riskMediumExtraHoldSec: number;
   /** Demo araçları (yalnız üretim dışı): ilk iki hesap yönetici, turnuvayı test botlarıyla doldurma. */
   demoTools: boolean;
+  /** K49: hizmet verilmeyen ülkeler (ISO kodu). */
+  geoBlockedCountries: string[];
+  /** K49: 'enforce' engeller; 'log' yalnız kaydeder (test sunucusunda varsayılan). */
+  geoBlockMode: 'enforce' | 'log';
+  /** K49: IP aralıklarının indirildiği resmî bölgesel kayıt dosyası; null ise indirilmez. */
+  geoDataUrl: string | null;
+  /** K49: önde Cloudflare varsa CF-IPCountry başlığına güvenilir. */
+  trustCountryHeader: boolean;
 }
 
 function num(name: string, fallback: number): number {
@@ -171,6 +179,12 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     vapidPublicKey: process.env.VAPID_PUBLIC_KEY || null,
     vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || null,
     digestHourUtc: num('DIGEST_HOUR_UTC', 15),
+    geoBlockedCountries: (process.env.GEO_BLOCKED_COUNTRIES ?? 'AZ').split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c)),
+    geoBlockMode: (process.env.GEO_BLOCK_MODE === 'log' || process.env.GEO_BLOCK_MODE === 'enforce'
+      ? process.env.GEO_BLOCK_MODE
+      : bool('DEMO_TOOLS', false) ? 'log' : 'enforce'),
+    geoDataUrl: process.env.GEO_DATA_URL ?? ((overrides.env ?? env) === 'test' ? null : 'https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest'),
+    trustCountryHeader: bool('TRUST_COUNTRY_HEADER', false),
     ...overrides,
   };
   if (prod && cfg.jwtSecret.length < 32) throw new Error('JWT_SECRET en az 32 karakter olmalı');

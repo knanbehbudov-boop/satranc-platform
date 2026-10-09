@@ -35,6 +35,8 @@ export interface WebhookEvent {
   currency?: string;
   failureReason?: string;
   cardLast4?: string;
+  /** K49: kartı çıkaran bankanın ülkesi (ISO kodu), sağlayıcı bildiriyorsa. */
+  cardCountry?: string;
   raw: unknown;
 }
 

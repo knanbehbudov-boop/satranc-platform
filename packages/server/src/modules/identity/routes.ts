@@ -4,6 +4,7 @@ import { RULES } from '../../infra/http/ratelimit.ts';
 import type { Ctx, Router } from '../../infra/http/router.ts';
 import { parse } from '../../infra/http/validate.ts';
 import type { IdentityService, LoginResult } from './service.ts';
+import type { GeoService } from '../geo/service.ts';
 
 const REFRESH_COOKIE = 'rt';
 const AUTH_PATH = '/v1/auth';
@@ -28,7 +29,7 @@ function assertSameOrigin(ctx: Ctx): void {
   }
 }
 
-export function identityRoutes(router: Router, svc: IdentityService, cfg: Config): void {
+export function identityRoutes(router: Router, svc: IdentityService, cfg: Config, geo?: GeoService): void {
   const meta = (ctx: Ctx) => ({ ip: ctx.ip, userAgent: ctx.userAgent, deviceKey: ctx.deviceKey });
   const issue = (ctx: Ctx, r: LoginResult) => {
     ctx.setCookie(REFRESH_COOKIE, r.refreshToken, { path: AUTH_PATH, maxAgeSec: cfg.refreshTokenTtlSec, httpOnly: true, sameSite: 'Strict' });
@@ -46,9 +47,11 @@ export function identityRoutes(router: Router, svc: IdentityService, cfg: Config
         countryCode: { type: 'string', upper: true, pattern: COUNTRY },
         acceptTos: { type: 'boolean', mustBeTrue: true },
         newTournamentsEmail: { type: 'boolean', optional: true },
+        locale: { type: 'string', pattern: /^(tr|en|ru)$/, optional: true },
       },
       ctx.body,
     );
+    await geo?.assertAllowed(ctx, 'register', { countryCode: b.countryCode });
     ctx.status = 201;
     return { user: await svc.register(b, meta(ctx)), tosVersion: cfg.tosVersion };
   });

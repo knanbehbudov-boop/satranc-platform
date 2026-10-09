@@ -22,7 +22,7 @@ const shots = process.env.SHOTS_DIR;
 const VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 try {
   // iPad boyutu
-  const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, hasTouch: true, isMobile: true });
+  const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, hasTouch: true, isMobile: true, locale: 'tr-TR' });
   await ctx.route('https://fonts.googleapis.com/**', (r) => r.abort());
   await ctx.route('https://fonts.gstatic.com/**', (r) => r.abort());
   const page = await ctx.newPage();
@@ -36,7 +36,7 @@ try {
   await page.fill('#reg-name', name);
   await page.fill('#reg-password', 'Kale-Fil-At-2026!');
   await page.fill('#reg-birth', '1988-04-12');
-  await page.selectOption('#reg-country', 'AZ');
+  await page.selectOption('#reg-country', 'TR');
   await page.check('#reg-tos');
   await page.click('#register-form button[type=submit]');
   await page.click('#dev-verify');
@@ -46,7 +46,7 @@ try {
   check(true, 'İlk hesap otomatik yönetici oldu');
   const userId = (await env.app.pool.query('SELECT id FROM users WHERE display_name = $1', [name])).rows[0].id;
 
-  const tid = (await env.app.pool.query(`SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id WHERE p.code = 'sng-4-blitz-5usd' AND t.status = 'OPEN'`)).rows[0].id;
+  const tid = (await env.app.pool.query(`SELECT t.id FROM tournaments t JOIN tournament_templates p ON p.id = t.template_id WHERE p.code = 'sng-4-3dk' AND t.status = 'OPEN'`)).rows[0].id;
   await page.goto(env.base + `/#/turnuva/${tid}`);
   await page.waitForSelector('#fill-bots');
   await page.click('#fill-bots');

@@ -21,6 +21,7 @@ import {
   verifyAccessToken,
   verifyPassword,
 } from './crypto.ts';
+import { asLocale, emailText, type Locale } from '../../infra/i18n.ts';
 
 export interface PublicUser {
   id: string;
@@ -30,6 +31,7 @@ export interface PublicUser {
   status: string;
   roles: string[];
   emailVerified: boolean;
+  locale: Locale;
   createdAt: string;
 }
 
@@ -44,6 +46,7 @@ interface UserRow {
   roles: string[];
   email_verified_at: Date | null;
   created_at: Date;
+  locale: string;
   closing_requested_at?: Date | null;
   closed_at?: Date | null;
 }
@@ -70,6 +73,7 @@ function toPublic(u: UserRow): PublicUser {
     status: u.status,
     roles: u.roles,
     emailVerified: u.email_verified_at !== null,
+    locale: asLocale(u.locale),
     createdAt: u.created_at.toISOString(),
   };
 }
@@ -98,7 +102,7 @@ export class IdentityService {
   };
 
   async register(
-    input: { email: string; password: string; displayName: string; birthDate: string; countryCode: string; acceptTos: boolean; newTournamentsEmail?: boolean | undefined },
+    input: { email: string; password: string; displayName: string; birthDate: string; countryCode: string; acceptTos: boolean; newTournamentsEmail?: boolean | undefined; locale?: string | undefined },
     meta: RequestMeta,
   ): Promise<PublicUser> {
     const birth = new Date(`${input.birthDate}T00:00:00Z`);
@@ -116,9 +120,9 @@ export class IdentityService {
     try {
       return await this.pool.tx(async (tx) => {
         const r = await tx.query<UserRow>(
-          `INSERT INTO users (email, display_name, password_hash, country_code, birth_year, tos_version, tos_accepted_at, notify_new_tournaments, notify_consent_at)
-           VALUES ($1, $2, $3, $4, $5, $6, now(), $7, CASE WHEN $7 THEN now() END) RETURNING *`,
-          [input.email, input.displayName, hash, input.countryCode, birth.getUTCFullYear(), this.cfg.tosVersion, input.newTournamentsEmail === true],
+          `INSERT INTO users (email, display_name, password_hash, country_code, birth_year, tos_version, tos_accepted_at, notify_new_tournaments, notify_consent_at, locale)
+           VALUES ($1, $2, $3, $4, $5, $6, now(), $7, CASE WHEN $7 THEN now() END, $8) RETURNING *`,
+          [input.email, input.displayName, hash, input.countryCode, birth.getUTCFullYear(), this.cfg.tosVersion, input.newTournamentsEmail === true, asLocale(input.locale)],
         );
         let user = r.rows[0] as UserRow;
         if (this.cfg.demoTools) {
@@ -151,15 +155,19 @@ export class IdentityService {
       `INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ($1, $2, 'verify_email', now() + interval '48 hours')`,
       [sha256(token), user.id],
     );
+    const t = emailText(asLocale(user.locale));
+    const m = t.verifyEmail(`${this.cfg.publicBaseUrl ?? ''}/#/dogrula?token=${token}`);
     await q.query(
       `INSERT INTO mail_outbox (to_email, template, subject, body, data) VALUES ($1, 'verify_email', $2, $3, $4)`,
-      [
-        user.email,
-        'E-posta adresinizi doğrulayın',
-        `Merhaba ${user.display_name},\n\nHesabınızı doğrulamak için bağlantıyı açın:\n${this.cfg.publicBaseUrl ?? ''}/#/dogrula?token=${token}\n\nBağlantı 48 saat geçerlidir.`,
-        { token, displayName: user.display_name },
-      ],
+      [user.email, m.subject, `${t.greeting(user.display_name)}\n\n${m.body}\n\n${t.signature}`, { token, displayName: user.display_name }],
     );
+  }
+
+  /** K48: dil tercihi (arayüz ve e-postalar). */
+  async setLocale(userId: string, locale: string): Promise<{ locale: Locale }> {
+    const l = asLocale(locale);
+    await this.pool.query('UPDATE users SET locale = $2 WHERE id = $1', [userId, l]);
+    return { locale: l };
   }
 
   async resendVerification(userId: string): Promise<void> {

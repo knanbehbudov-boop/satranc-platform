@@ -18,6 +18,7 @@ import type { Logger } from '../../infra/log.ts';
 import type { IdentityService } from '../identity/service.ts';
 import type { LedgerService } from '../ledger/service.ts';
 import { WebhookSignatureError, type PaymentProvider, type WebhookEvent } from './provider.ts';
+import type { GeoService } from '../geo/service.ts';
 
 export interface PaymentRow {
   id: string;
@@ -80,10 +81,12 @@ export class PaymentService {
   readonly provider: PaymentProvider;
   private readonly ledger: LedgerService;
   private readonly identity: IdentityService;
+  private readonly geo: GeoService | null;
   private timer: NodeJS.Timeout | null = null;
   private refunding = false;
 
-  constructor(deps: { pool: Pool; logger: Logger; provider: PaymentProvider; ledger: LedgerService; identity: IdentityService }) {
+  constructor(deps: { pool: Pool; logger: Logger; provider: PaymentProvider; ledger: LedgerService; identity: IdentityService; geo?: GeoService }) {
+    this.geo = deps.geo ?? null;
     this.pool = deps.pool;
     this.logger = deps.logger;
     this.provider = deps.provider;
@@ -256,11 +259,26 @@ export class PaymentService {
     const cents = ev.amountCents ?? p.amount_cents;
     const currency = (ev.currency ?? p.currency).toUpperCase();
     await tx.query(
-      `UPDATE payments SET status = 'SUCCEEDED', provider_ref = $2, fee_cents = $3, card_last4 = $4, failure_reason = NULL, updated_at = now() WHERE id = $1`,
-      [p.id, ev.ref ?? p.provider_ref, ev.feeCents ?? 0, ev.cardLast4 ?? null],
+      `UPDATE payments SET status = 'SUCCEEDED', provider_ref = $2, fee_cents = $3, card_last4 = $4, card_country = $5, failure_reason = NULL, updated_at = now() WHERE id = $1`,
+      [p.id, ev.ref ?? p.provider_ref, ev.feeCents ?? 0, ev.cardLast4 ?? null, ev.cardCountry ?? null],
     );
     // Para sağlayıcıda: önce geçici hesaba (koltuğa bağlama turnuva modülünün kararı).
     await this.ledger.recordReceipt(tx, { paymentId: p.id, cents, feeCents: ev.feeCents ?? 0, currency });
+    if (this.geo?.isBlockedCountry(ev.cardCountry)) {
+      // K49: hizmet verilmeyen ülkede çıkarılmış kart: kabul edilmez, otomatik iade edilir.
+      await tx.query(
+        `INSERT INTO audit_log (actor_id, action, target_type, target_id, data) VALUES ($1::uuid, 'geo.card_blocked', 'payment', $2::text, $3)`,
+        [p.user_id, p.id, { cardCountry: ev.cardCountry, mode: this.geo.enforcing ? 'enforce' : 'log' }],
+      );
+      if (this.geo.enforcing) {
+        this.logger.warn('Engelli ülke kartı; ödeme iade ediliyor', { paymentId: p.id, cardCountry: ev.cardCountry });
+        await this.requestRefund(tx, { paymentId: p.id, source: 'orphan', reason: 'card_country_blocked', cents }, after);
+        if (p.purpose !== 'deposit') {
+          await publish(tx, 'payment.blocked', { paymentId: p.id, userId: p.user_id, tournamentId: p.tournament_id, entryId: p.entry_id, reason: 'card_country_blocked' });
+        }
+        return;
+      }
+    }
     if (cents !== p.amount_cents || currency !== p.currency) {
       // Beklenmeyen tutar: koltuğa bağlanmaz, iade edilir ve kayıt düşülür.
       this.logger.error('Ödeme tutarı uyuşmuyor; iade ediliyor', { paymentId: p.id, expected: p.amount_cents, got: cents, currency });

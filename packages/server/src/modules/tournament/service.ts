@@ -585,6 +585,22 @@ export class TournamentService {
     });
   };
 
+  /** K49: engelli ülke kartıyla ödeme: para iade edilir (payments), koltuk bırakılır. */
+  onPaymentBlocked = async (event: OutboxEvent, tx: Connection, hooks: HandlerHooks): Promise<void> => {
+    const e = event.payload as { paymentId: string; userId: string; tournamentId: string | null; entryId: string | null; reason: string };
+    if (!e.tournamentId || !e.entryId) return;
+    await this.lock(tx, e.tournamentId);
+    await tx.query(
+      `UPDATE entries SET status = 'WITHDRAWN', exit_reason = $2, expires_at = NULL WHERE id = $1 AND status = 'RESERVED'`,
+      [e.entryId, e.reason],
+    );
+    const tid = e.tournamentId;
+    hooks.afterCommit(() => {
+      this.hub.sendToUser(e.userId, { type: 'payment.orphaned', tournamentId: tid, paymentId: e.paymentId, reason: e.reason });
+      this.notify(tid);
+    });
+  };
+
   onPaymentFailed = async (event: OutboxEvent, _tx: Connection, hooks: HandlerHooks): Promise<void> => {
     const e = event.payload as { paymentId: string; userId: string; tournamentId: string | null; reason?: string };
     hooks.afterCommit(() => this.hub.sendToUser(e.userId, { type: 'payment.failed', tournamentId: e.tournamentId, paymentId: e.paymentId, reason: e.reason ?? null }));
